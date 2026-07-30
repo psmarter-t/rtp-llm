@@ -30,7 +30,10 @@ def get_git_commit() -> str:
 #  Custom arg extraction (consumed before forwarding to engine)
 # ---------------------------------------------------------------------------
 
-def _extract_custom_args(argv: List[str]) -> Tuple[List[str], Optional[str], Optional[str], bool]:
+
+def _extract_custom_args(
+    argv: List[str],
+) -> Tuple[List[str], Optional[str], Optional[str], bool]:
     """Extract --perf_test_name, --test_env, --compare_test_result, --update_test_result from argv.
 
     Returns (cleaned_argv, compare_baseline_path, perf_test_name, update_test_result).
@@ -88,6 +91,7 @@ def _extract_custom_args(argv: List[str]) -> Tuple[List[str], Optional[str], Opt
 #  Model path conversion (removed — weight_convert_api deleted)
 # ---------------------------------------------------------------------------
 
+
 def _try_convert_model_path(argv: List[str]) -> List[str]:
     return argv
 
@@ -101,8 +105,7 @@ REGRESSION_THRESHOLD = 0.10
 
 def _load_baseline(baseline_path: str) -> Dict[str, Any]:
     if not os.path.exists(baseline_path):
-        logging.warning(f"Baseline file not found: {baseline_path}")
-        return {}
+        raise FileNotFoundError(f"Baseline file not found: {baseline_path}")
     with open(baseline_path) as f:
         return json.load(f)
 
@@ -137,14 +140,19 @@ def _collect_decode_times(result_dir: str) -> Dict[str, float]:
                 seq = m.get("input_len")
                 dt = m.get("avg_decode_time")
                 success_rate = m.get("success_rate")
-                if bs is not None and seq is not None and dt is not None and success_rate == 1.0:
+                if (
+                    bs is not None
+                    and seq is not None
+                    and dt is not None
+                    and success_rate == 1.0
+                ):
                     times[f"bs{int(bs)}_seq{int(seq)}"] = float(dt)
     return times
 
 
 def _sort_key(key: str):
     """Sort composite keys numerically: 'bs1_seq128' -> (1,128), '32' -> (32,0)."""
-    nums = list(map(int, re.findall(r'\d+', key)))
+    nums = list(map(int, re.findall(r"\d+", key)))
     return tuple(nums) if nums else (0,)
 
 
@@ -158,7 +166,9 @@ def _format_comparison_table(
     for key in sorted(baseline_times, key=_sort_key):
         baseline_val = baseline_times[key]
         if key not in current_times:
-            lines.append(f"{key:>20} {baseline_val:>14.2f} {'N/A':>14} {'N/A':>10} {'SKIP':>8}")
+            lines.append(
+                f"{key:>20} {baseline_val:>14.2f} {'N/A':>14} {'N/A':>10} {'SKIP':>8}"
+            )
             continue
         current_val = current_times[key]
         delta_pct = (current_val / baseline_val - 1) * 100
@@ -193,7 +203,9 @@ def _collect_tps_results(result_dir: str) -> Dict[str, float]:
         if data.get("mode") != "tps":
             continue
         for r in data.get("results", []):
-            key = f"seq{r['input_len']}" if r.get("input_len", 0) > 0 else "distribution"
+            key = (
+                f"seq{r['input_len']}" if r.get("input_len", 0) > 0 else "distribution"
+            )
             tps_map[key] = r.get("tps", 0.0)
     return tps_map
 
@@ -209,7 +221,9 @@ def _format_tps_comparison_table(
     for key in sorted(baseline_tps, key=_sort_key):
         baseline_val = baseline_tps[key]
         if key not in current_tps:
-            lines.append(f"{key:>20} {baseline_val:>14.2f} {'N/A':>14} {'N/A':>10} {'SKIP':>8}")
+            lines.append(
+                f"{key:>20} {baseline_val:>14.2f} {'N/A':>14} {'N/A':>10} {'SKIP':>8}"
+            )
             continue
         current_val = current_tps[key]
         if baseline_val > 0:
@@ -238,12 +252,16 @@ def validate_tps_against_baseline(result_dir: str, baseline: Dict[str, Any]) -> 
         return False
 
     table = _format_tps_comparison_table(baseline_tps, current_tps)
-    print(f"\n=== TPS Baseline Comparison (threshold: {REGRESSION_THRESHOLD * 100:.0f}%) ===")
+    print(
+        f"\n=== TPS Baseline Comparison (threshold: {REGRESSION_THRESHOLD * 100:.0f}%) ==="
+    )
     print(table)
 
     passed = True
     for key, baseline_val in baseline_tps.items():
         if key not in current_tps:
+            logging.error("Missing TPS result for baseline key %s", key)
+            passed = False
             continue
         current_val = current_tps[key]
         threshold = baseline_val * (1 - REGRESSION_THRESHOLD)
@@ -277,16 +295,20 @@ def validate_against_baseline(result_dir: str, baseline_path: Optional[str]) -> 
 
     current_times = _collect_decode_times(result_dir)
     if not current_times:
-        logging.warning("No decode times in results, skip validation")
-        return True
+        logging.error("No decode times found but baseline expects decode data")
+        return False
 
     table = _format_comparison_table(baseline_times, current_times)
-    print(f"\n=== Perf Baseline Comparison (threshold: {REGRESSION_THRESHOLD * 100:.0f}%) ===")
+    print(
+        f"\n=== Perf Baseline Comparison (threshold: {REGRESSION_THRESHOLD * 100:.0f}%) ==="
+    )
     print(table)
 
     passed = True
     for key, baseline_val in baseline_times.items():
         if key not in current_times:
+            logging.error("Missing decode result for baseline key %s", key)
+            passed = False
             continue
         current_val = current_times[key]
         threshold = baseline_val * (1 + REGRESSION_THRESHOLD)
@@ -325,10 +347,16 @@ def _osscmd(local: str, remote: str) -> List[str]:
             "MAGA_OSS_KEY_ID / MAGA_OSS_KEY_SECRET not set, cannot upload to OSS"
         )
     return [
-        "osscmd", "put", local, remote,
-        "-H", cred["host"],
-        "-i", cred["id"],
-        "-k", cred["key"],
+        "osscmd",
+        "put",
+        local,
+        remote,
+        "-H",
+        cred["host"],
+        "-i",
+        cred["id"],
+        "-k",
+        cred["key"],
         "--replace=true",
     ]
 
@@ -384,7 +412,9 @@ def _get_odps_client():
     ak_id = os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID", "")
     ak_secret = os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET", "")
     project = os.environ.get("ODPS_PROJECT", "rank_service_dev")
-    endpoint = os.environ.get("ODPS_ENDPOINT", "http://service-corp.odps.aliyun-inc.com/api")
+    endpoint = os.environ.get(
+        "ODPS_ENDPOINT", "http://service-corp.odps.aliyun-inc.com/api"
+    )
     if not ak_id or not ak_secret:
         return None
     try:
@@ -452,7 +482,9 @@ def write_summary_to_odps(
         dataset_path = test_info.get("dataset_path") or ""
         if dataset_path:
             parent = os.path.basename(os.path.dirname(dataset_path))
-            dataset_name = parent if parent and parent != "." else os.path.basename(dataset_path)
+            dataset_name = (
+                parent if parent and parent != "." else os.path.basename(dataset_path)
+            )
 
     test_types = []
     if partial in (0, 1):
@@ -469,22 +501,26 @@ def write_summary_to_odps(
 
     records = []
     for tt in test_types:
-        records.append([
-            os.environ.get("PERF_TEST_NAME", "unknown"),
-            tt,
-            mode,
-            dataset_name,
-            get_git_commit(),
-            oss_path,
-            now.isoformat(),
-            round(duration_seconds, 2),
-        ])
+        records.append(
+            [
+                os.environ.get("PERF_TEST_NAME", "unknown"),
+                tt,
+                mode,
+                dataset_name,
+                get_git_commit(),
+                oss_path,
+                now.isoformat(),
+                round(duration_seconds, 2),
+            ]
+        )
 
     for attempt in range(1, 6):
         try:
             with table.open_writer(partition=partition_spec) as writer:
                 writer.write(records)
-            logging.info(f"ODPS write success: {len(records)} record(s) (attempt {attempt})")
+            logging.info(
+                f"ODPS write success: {len(records)} record(s) (attempt {attempt})"
+            )
             return
         except Exception as e:
             logging.warning(f"ODPS write attempt {attempt} failed: {e}")
@@ -504,7 +540,9 @@ def _print_new_golden(result_dir: str, baseline_path: Optional[str]) -> None:
     golden = {}
     if baseline_path:
         golden = _load_baseline(baseline_path)
-    golden["decode_times"] = {k: dt for k, dt in sorted(current_times.items(), key=lambda x: _sort_key(x[0]))}
+    golden["decode_times"] = {
+        k: dt for k, dt in sorted(current_times.items(), key=lambda x: _sort_key(x[0]))
+    }
     golden["updated"] = datetime.now().isoformat()
 
     golden_json = json.dumps(golden, indent=4)
@@ -522,8 +560,12 @@ def _print_new_golden(result_dir: str, baseline_path: Optional[str]) -> None:
 
 def write_test_meta(result_dir: str):
     env_keys = [
-        "DEVICE_NAME", "DEVICE_RESERVE_MEMORY_BYTES", "RESERVER_RUNTIME_MEM_MB",
-        "SEQ_SIZE_PER_BLOCK", "INT8_MODE", "QUANTIZATION",
+        "DEVICE_NAME",
+        "DEVICE_RESERVE_MEMORY_BYTES",
+        "RESERVER_RUNTIME_MEM_MB",
+        "SEQ_SIZE_PER_BLOCK",
+        "INT8_MODE",
+        "QUANTIZATION",
     ]
     env_args = {k: os.environ[k] for k in env_keys if k in os.environ}
     meta = {

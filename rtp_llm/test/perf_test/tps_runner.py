@@ -111,6 +111,11 @@ class TpsBinarySearchRunner:
                 hi = mid_idx - 1
 
         if best_bs == 0:
+            if not any(step.success_rate == 1.0 for step in steps):
+                raise RuntimeError(
+                    f"TPS search [{label}] produced no valid measurement: "
+                    "every tested batch size had failed requests"
+                )
             logging.warning(f"  [{label}] No BS satisfies target TPOT!")
 
         tps = best_bs / (best_tpot / 1000) if best_tpot > 0 else 0.0
