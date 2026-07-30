@@ -6,6 +6,7 @@ from typing import Dict, Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.output_vocab_config import OutputVocabConfig
 
 st = time.time()
 from rtp_llm.ops import (
@@ -490,6 +491,7 @@ class PyEnvConfigs:
             ProfilingDebugLoggingConfig()
         )
         self.model_args: ModelArgs = ModelArgs()
+        self.output_vocab_config: OutputVocabConfig = OutputVocabConfig()
         self.lora_config: LoraConfig = LoraConfig()
         self.load_config: LoadConfig = LoadConfig()
         self.render_config: RenderConfig = RenderConfig()

@@ -47,6 +47,7 @@ cc_test(
     copts = copts(),
     deps = test_deps + [
         "//3rdparty/flashinfer:flashinfer",
+        "//rtp_llm/cpp/config:generation_limits",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
     ],
     exec_properties = {'gpu':'H20'},

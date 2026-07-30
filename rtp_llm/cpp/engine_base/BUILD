@@ -82,11 +82,11 @@ cc_library(
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/config:eplb_config",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:output_vocab_mapping",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
 )
-
-

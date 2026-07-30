@@ -6,12 +6,22 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <algorithm>
 #include <exception>
+#include <limits>
+#include <tuple>
 #include <unordered_set>
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+torch::Tensor validLogitEntries(const torch::Tensor& logits) {
+    return torch::isfinite(logits).logical_and(logits.gt(-std::numeric_limits<float>::max()));
+}
+
+}  // namespace
 
 Sampler::Sampler(const SamplerInitParams& params):
     fixed_max_batch_size_(params.max_batch_size > 0 && params.fixed_max_batch_size) {
@@ -114,7 +124,13 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
     bool has_num_beams = std::any_of(num_beams_in, num_beams_in + inputs.batch_size, [](auto n) { return n > 1; })
                          || std::any_of(num_beams_out, num_beams_out + inputs.batch_size, [](auto n) { return n > 1; });
-    bool variable_num_beams = inputs.batch_size != inputs.batch_size_out;
+    // Per-group expansion and shrink can cancel out in the aggregate. Any beam
+    // width change needs separate storage so an earlier group cannot overwrite
+    // token histories or cumulative scores that a later group still reads.
+    bool needs_separate_output = inputs.batch_size != inputs.batch_size_out;
+    for (size_t i = 0; i < inputs.batch_size && !needs_separate_output; ++i) {
+        needs_separate_output = num_beams_in[i] != num_beams_out[i];
+    }
 
     // allocate output tensors
     // Keep success on CUDA to avoid a blocking D2H copy: the GPU sampling kernel writes success
@@ -128,11 +144,13 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     // Use blocking transfer: on ROCm, hipMemcpyAsync from pageable memory is truly async
     // and can cause memory access faults if a kernel reads the buffer before transfer completes.
     auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
-    auto all_token_ids_out     = variable_num_beams ?
+    auto penalty_token_ids_cuda =
+        inputs.penalty_token_ids.defined() ? inputs.penalty_token_ids.to(torch::kCUDA) : torch::Tensor();
+    auto all_token_ids_out     = needs_separate_output ?
                                      torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},
                                               torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)) :
                                      inputs_token_ids_cuda;
-    auto all_cum_log_probs_out = variable_num_beams && inputs.cum_log_probs.defined() ?
+    auto all_cum_log_probs_out = needs_separate_output && inputs.cum_log_probs.defined() ?
                                      torch::empty({(int64_t)inputs.batch_size_out}, torch::kFloat32) :
                                      inputs.cum_log_probs;
 
@@ -170,14 +188,15 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         const auto batch_size_out   = beam_batch_size * cur_num_beams_out;
         const auto to_batch_idx_out = from_batch_idx_out + batch_size_out;
 
-        auto success           = all_success.narrow(0, from_batch_idx_in, batch_size_in);
-        auto logits            = inputs.logits.narrow(0, from_batch_idx_in, batch_size_in);
-        auto token_ids_in      = inputs_token_ids_cuda.narrow(0, from_batch_idx_in, batch_size_in);
-        auto token_ids_out     = all_token_ids_out.narrow(0, from_batch_idx_out, batch_size_out);
-        auto input_lengths     = inputs.input_lengths.narrow(0, from_batch_idx_in, batch_size_in);
-        auto sequence_lengths  = inputs.sequence_lengths.narrow(0, from_batch_idx_in, batch_size_in);
-        auto cum_log_probs_in  = mayNarrow(inputs.cum_log_probs, from_batch_idx_in, batch_size_in);
-        auto cum_log_probs_out = mayNarrow(all_cum_log_probs_out, from_batch_idx_out, batch_size_out);
+        auto success              = all_success.narrow(0, from_batch_idx_in, batch_size_in);
+        auto logits               = inputs.logits.narrow(0, from_batch_idx_in, batch_size_in);
+        auto token_ids_in         = inputs_token_ids_cuda.narrow(0, from_batch_idx_in, batch_size_in);
+        auto penalty_token_ids_in = mayOptNarrow(penalty_token_ids_cuda, from_batch_idx_in, batch_size_in);
+        auto token_ids_out        = all_token_ids_out.narrow(0, from_batch_idx_out, batch_size_out);
+        auto input_lengths        = inputs.input_lengths.narrow(0, from_batch_idx_in, batch_size_in);
+        auto sequence_lengths     = inputs.sequence_lengths.narrow(0, from_batch_idx_in, batch_size_in);
+        auto cum_log_probs_in     = mayNarrow(inputs.cum_log_probs, from_batch_idx_in, batch_size_in);
+        auto cum_log_probs_out    = mayNarrow(all_cum_log_probs_out, from_batch_idx_out, batch_size_out);
 
         if (cur_num_beams_in == 1 && cur_num_beams_out == 1) {
             const auto decoder_batch_size = (int64_t)inputs.sequence_lengths.size(0);
@@ -201,7 +220,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto presence_penalty     = mayOptNarrow(inputs.presence_penalty, from_batch_idx_in, batch_size_in);
             auto frequency_penalty    = mayOptNarrow(inputs.frequency_penalty, from_batch_idx_in, batch_size_in);
             auto no_repeat_ngram_size = mayOptNarrow(inputs.no_repeat_ngram_size, from_batch_idx_in, batch_size_in);
-            auto all_probs            = mayOptNarrow(inputs.all_probs, from_batch_idx_in, batch_size_in);
+            auto all_probs            = mayOptNarrow(inputs.all_probs, from_batch_idx_out, batch_size_out);
             auto do_sample            = mayOptNarrow(inputs.do_sample, from_batch_idx_in, batch_size_in);
             auto generator            = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
                                                                    inputs.generator.begin() + from_batch_idx_in + batch_size_in};
@@ -233,15 +252,18 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  frequency_penalty,
                  do_sample,
                  generator,
-                 greedy_sampling_buffer_ptr});
+                 greedy_sampling_buffer_ptr,
+                 penalty_token_ids_in,
+                 inputs.validate_logits_candidates});
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
-                // TODO(zhangjianning.zjn): would be better to eliminate the copy
-                if (variable_num_beams) {
-                    token_ids_out.copy_(token_ids_in);
-                }
             } else {
                 success.fill_(true);
+            }
+            // A mixed variable-beam batch owns a separate output buffer even
+            // when this group takes the 1 -> 1 greedy path.
+            if (needs_separate_output) {
+                token_ids_out.copy_(token_ids_in);
             }
         } else {
             RTP_LLM_LOG_DEBUG("current_num_beams_in is %d", cur_num_beams_in);
@@ -268,11 +290,35 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                     cum_log_probs_in.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_in}) :
                     torch::zeros({(int64_t)beam_batch_size, (int64_t)cur_num_beams_in});
 
-            auto logits_t           = logits_reshaped.to(torch::kCUDA);
-            auto token_ids_in_t     = token_ids_in_reshaped.to(torch::kCUDA);
-            auto input_lengths_t    = input_lengths_reshaped.to(torch::kCUDA);
-            auto sequence_lengths_t = sequence_lengths_reshaped.to(torch::kCUDA);
-            auto cum_log_probs_in_t = cum_log_probs_in_reshaped.to(torch::kCUDA);
+            auto          logits_t           = logits_reshaped.to(torch::kCUDA);
+            auto          token_ids_in_t     = token_ids_in_reshaped.to(torch::kCUDA);
+            auto          input_lengths_t    = input_lengths_reshaped.to(torch::kCUDA);
+            auto          sequence_lengths_t = sequence_lengths_reshaped.to(torch::kCUDA);
+            auto          cum_log_probs_in_t = cum_log_probs_in_reshaped.to(torch::kCUDA);
+            torch::Tensor valid_groups;
+            if (inputs.validate_logits_candidates) {
+                // Beam capacity is a property of the logical group, not of an
+                // individual parent row. A parent with no usable candidate can
+                // be ignored as long as the remaining parents can still supply
+                // every requested child.
+                auto valid_entries = validLogitEntries(logits_t);
+                // -inf is an intentional constraint sentinel. NaN and +inf are
+                // unsafe for log_softmax/TopK and make the whole logical group fail.
+                auto unsafe_entries = torch::isfinite(logits_t).logical_not().logical_and(
+                    logits_t.ne(-std::numeric_limits<float>::infinity()));
+                auto valid_parent_scores = torch::isfinite(cum_log_probs_in_t)
+                                               .logical_and(cum_log_probs_in_t.gt(-std::numeric_limits<float>::max()));
+                auto usable_entries = valid_entries.logical_and(valid_parent_scores.unsqueeze(-1));
+                valid_groups        = usable_entries.sum({1, 2})
+                                   .ge(cur_num_beams_out)
+                                   .logical_and(unsafe_entries.any({1, 2}).logical_not());
+
+                logits_t.masked_fill_(unsafe_entries, -std::numeric_limits<float>::infinity());
+                auto valid_logit_rows = valid_entries.any(-1);
+                logits_t.masked_fill_(valid_logit_rows.logical_not().unsqueeze(-1), 0.0f);
+                auto usable_parents = valid_logit_rows.logical_and(valid_parent_scores);
+                cum_log_probs_in_t.masked_fill_(usable_parents.logical_not(), -std::numeric_limits<float>::infinity());
+            }
 
             auto output = execSampleBeamSearch({logits_t,
                                                 token_ids_in_t,
@@ -294,7 +340,25 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             }
             beam_indices.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_out}).copy_(output.beam_indices);
 
-            success.fill_(true);
+            if (inputs.all_probs.defined()) {
+                // BeamSearchOp converts logits to log-softmax in place. Associate
+                // each child beam with the probability row of its selected parent.
+                auto parent_indices =
+                    output.beam_indices.to(torch::kLong)
+                        .unsqueeze(-1)
+                        .expand({(int64_t)beam_batch_size, (int64_t)cur_num_beams_out, (int64_t)vocab_size});
+                auto selected_probs = logits_t.exp().gather(1, parent_indices);
+                inputs.all_probs.narrow(0, from_batch_idx_out, batch_size_out)
+                    .copy_(selected_probs.reshape({(int64_t)batch_size_out, (int64_t)vocab_size}));
+            }
+
+            if (valid_groups.defined()) {
+                success.copy_(valid_groups.unsqueeze(1)
+                                  .expand({(int64_t)beam_batch_size, (int64_t)cur_num_beams_in})
+                                  .reshape({(int64_t)batch_size_in}));
+            } else {
+                success.fill_(true);
+            }
         }
 
         // prepare for next sampling

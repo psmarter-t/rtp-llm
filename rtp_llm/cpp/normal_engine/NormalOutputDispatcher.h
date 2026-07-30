@@ -2,17 +2,23 @@
 
 #include <memory>
 #include <torch/all.h>
+#include <utility>
 #include "absl/status/status.h"
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/config/OutputVocabMapping.h"
 
 namespace rtp_llm {
 
 class NormalOutputDispatcher {
 public:
-    explicit NormalOutputDispatcher(std::shared_ptr<autil::LockFreeThreadPool> thread_pool = nullptr):
-        thread_pool_(std::move(thread_pool)) {}
+    explicit NormalOutputDispatcher(OutputVocabMappingPtr                      output_vocab_mapping = nullptr,
+                                    std::shared_ptr<autil::LockFreeThreadPool> thread_pool          = nullptr):
+        thread_pool_(std::move(thread_pool)), output_vocab_mapping_(std::move(output_vocab_mapping)) {}
+
+    explicit NormalOutputDispatcher(std::shared_ptr<autil::LockFreeThreadPool> thread_pool):
+        NormalOutputDispatcher(nullptr, std::move(thread_pool)) {}
 
     absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
 
@@ -32,6 +38,7 @@ private:
                               const torch::Tensor& success_cpu) const;
 
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
+    OutputVocabMappingPtr                      output_vocab_mapping_;
 };
 
 }  // namespace rtp_llm

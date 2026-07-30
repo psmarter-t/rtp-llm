@@ -19,7 +19,7 @@ public:
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
 
 protected:
-    size_t eos_token_id_;
+    int64_t eos_token_id_ = -1;
 };
 
 using MultiSeqLogitsProcessorPtr = std::shared_ptr<MultiSeqLogitsProcessor>;

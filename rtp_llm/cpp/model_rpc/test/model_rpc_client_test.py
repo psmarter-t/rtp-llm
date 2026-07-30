@@ -121,6 +121,19 @@ class ModelRpcClientTest(TestCase):
             responses.extend(res.generate_outputs)
         return responses
 
+    def test_no_repeat_ngram_size_serializes_as_scalar(self):
+        input_py = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2]),
+            generate_config=GenerateConfig(no_repeat_ngram_size=32),
+            mm_inputs=[],
+        )
+
+        input_pb = trans_input(input_py)
+
+        self.assertTrue(input_pb.generate_config.HasField("no_repeat_ngram_size"))
+        self.assertEqual(input_pb.generate_config.no_repeat_ngram_size.value, 32)
+
     @unittest.skip("need fix")
     def test_generate_stream(self):
         client = FakeModelRpcClient()

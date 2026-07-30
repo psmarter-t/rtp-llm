@@ -8,6 +8,19 @@
 
 namespace rtp_llm {
 
+namespace {
+
+bool hasActivePenalty(const StreamGroups& stream_groups) {
+    auto all_streams = stream_groups.allStreams();
+    return std::any_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+        const auto& config = *stream->generateConfig();
+        return config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f || config.frequency_penalty != 0.0f
+               || config.no_repeat_ngram_size.value_or(0) != 0;
+    });
+}
+
+}  // namespace
+
 absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGroups&    stream_groups,
                                                                  const GptModelInputs&  model_inputs,
                                                                  const GptModelOutputs& model_output) const {
@@ -38,10 +51,22 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
             stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
 
         for (int i = 0; i < sampler_batch_size; ++i) {
-            int cur_batch = std::min(i, current_batch_size - 1);
-            memcpy(sampler_inputs.token_ids.data_ptr<int32_t>() + ((batch_idx) * (sampler_inputs.step + 1)),
-                   complete_token_ids.data_ptr<int32_t>() + cur_batch * complete_seq_len,
+            int   cur_batch  = std::min(i, current_batch_size - 1);
+            auto* source_ids = complete_token_ids.data_ptr<int32_t>() + cur_batch * complete_seq_len;
+            memcpy(sampler_inputs.token_ids.data_ptr<int32_t>() + batch_idx * (sampler_inputs.step + 1),
+                   source_ids,
                    seq_len * sizeof(int));
+            if (sampler_inputs.penalty_token_ids.defined()) {
+                auto* penalty_ids =
+                    sampler_inputs.penalty_token_ids.data_ptr<int32_t>() + batch_idx * (sampler_inputs.step + 1);
+                for (size_t token_idx = 0; token_idx < seq_len; ++token_idx) {
+                    const auto full_id  = source_ids[token_idx];
+                    const auto local_id = output_vocab_mapping_->toLocal(full_id);
+                    // Preserve equality for out-of-set history without creating a valid local logit index.
+                    penalty_ids[token_idx] =
+                        local_id.has_value() ? local_id.value() : (full_id >= 0 ? -full_id - 1 : full_id);
+                }
+            }
             reinterpret_cast<bool*>(sampler_inputs.finished_mask.data_ptr())[batch_idx] =
                 stream->isSubGenerateDoneWithoutLock(i);
             batch_idx += 1;
@@ -60,7 +85,7 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
     auto vocab_size           = (size_t)model_output.logits.size(1);
     sampler_inputs.vocab_size = vocab_size;
     if (return_all_probs != ReturnAllProbsMode::NONE) {
-        sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size_in, (int64_t)vocab_size},
+        sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size_out, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
         if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
             sampler_inputs.return_original_all_probs = true;
@@ -108,11 +133,12 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
                                                                 size_t              propose_step) const {
     // TODO(xinfei.sxf) don't sample for chunk stream
     SamplerInputs sampler_inputs;
-    sampler_inputs.step             = stream_groups.maxSeqLen() + propose_step;
-    sampler_inputs.batch_size       = total_batch_size_in;
-    sampler_inputs.batch_size_out   = total_batch_size_out;
-    auto bs                         = (int64_t)total_batch_size_in;
-    sampler_inputs.sequence_lengths = torch::empty({bs}, torch::kInt32);
+    sampler_inputs.step                       = stream_groups.maxSeqLen() + propose_step;
+    sampler_inputs.batch_size                 = total_batch_size_in;
+    sampler_inputs.batch_size_out             = total_batch_size_out;
+    sampler_inputs.validate_logits_candidates = output_vocab_mapping_ != nullptr;
+    auto bs                                   = (int64_t)total_batch_size_in;
+    sampler_inputs.sequence_lengths           = torch::empty({bs}, torch::kInt32);
     sampler_inputs.logits_processor_states_ptr.reset();
     sampler_inputs.input_lengths  = torch::empty({bs}, torch::kInt32);
     sampler_inputs.num_beams_in   = torch::empty({bs}, torch::kLong);
@@ -136,6 +162,10 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     }
     sampler_inputs.token_ids =
         torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, torch::kInt32);
+    if (output_vocab_mapping_ && hasActivePenalty(stream_groups)) {
+        sampler_inputs.penalty_token_ids =
+            torch::full({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, -1, torch::kInt32);
+    }
     sampler_inputs.generator.resize(total_batch_size_in);
     return sampler_inputs;
 }
@@ -174,11 +204,14 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
                    cum_log_probs.numel() * sizeof(float));
         }
         for (int i = 0; i < sampler_batch_size; ++i) {
-            input_lengths[batch_idx]      = stream->inputLength();
-            sequence_lengths[batch_idx]   = stream->seqLength() + propose_step;
-            num_beams_in[batch_idx]       = stream->currentNumBeams();
-            num_beams_out[batch_idx]      = stream->nextNumBeams();
-            top_k[batch_idx]              = stream->generateConfig()->top_k;
+            input_lengths[batch_idx]    = stream->inputLength();
+            sequence_lengths[batch_idx] = stream->seqLength() + propose_step;
+            num_beams_in[batch_idx]     = stream->currentNumBeams();
+            num_beams_out[batch_idx]    = stream->nextNumBeams();
+            top_k[batch_idx]            = stream->generateConfig()->top_k;
+            if (output_vocab_mapping_ && top_k[batch_idx] > 0) {
+                top_k[batch_idx] = std::min<uint32_t>(top_k[batch_idx], output_vocab_mapping_->size());
+            }
             top_p[batch_idx]              = stream->generateConfig()->top_p;
             temperature[batch_idx]        = stream->generateConfig()->temperature;
             repetition_penalty[batch_idx] = stream->generateConfig()->repetition_penalty;
@@ -200,7 +233,7 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
 void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&                sampler_inputs,
                                                           std::list<GenerateStreamPtr>& all_streams,
                                                           bool                          score_batch) const {
-    LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
+    LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>(output_vocab_mapping_);
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, idx = 0](auto& stream) mutable {
         const auto batch_size = stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {

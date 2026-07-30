@@ -8,6 +8,7 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     const ProfilingDebugLoggingConfig&         profiling_debug_logging_config,
     const CacheConfig&                         cache_config,
     bool                                       warm_up,
+    OutputVocabMappingPtr                      output_vocab_mapping,
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool):
     thread_pool_(std::move(thread_pool)) {
     model_input_gatherer_config_.num_layers              = model_config.num_layers;
@@ -35,8 +36,8 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.enable_detail_log = profiling_debug_logging_config.enable_detail_log;
 
     model_input_gatherer_   = std::make_unique<NormalModelInputGatherer>(model_input_gatherer_config_);
-    sampler_input_gatherer_ = std::make_unique<NormalSamplerInputGatherer>();
-    output_dispatcher_      = std::make_unique<NormalOutputDispatcher>(thread_pool_);
+    sampler_input_gatherer_ = std::make_unique<NormalSamplerInputGatherer>(output_vocab_mapping);
+    output_dispatcher_      = std::make_unique<NormalOutputDispatcher>(output_vocab_mapping, thread_pool_);
 }
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_groups,

@@ -150,9 +150,11 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
                               int                  input_length,
                               int                  max_token_num,
                               int                  vocab_size,
-                              bool                 is_beam_search,
+                              bool                 tokens_are_complete_sequences,
                               int64_t              stream_id,
                               int&                 error_token_id) {
+    RTP_LLM_CHECK(new_tokens.dim() == 2);
+    RTP_LLM_CHECK(new_tokens.scalar_type() == torch::kInt32);
     int new_batch_size = new_tokens.size(0);
     RTP_LLM_CHECK_WITH_INFO(
         new_batch_size <= max_batch_size_, "too many batches, expect < %d, found %d", max_batch_size_, new_batch_size);
@@ -170,35 +172,46 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
     // # typically 1 but can be > 1 under speculative decoding
     // # This differs from new_tokens.shape[-1] under beam search case,
     // # which needs to update all the generated tokens each update.
-    RTP_LLM_CHECK(new_tokens.dim() == 2);
-
-    auto       new_tokens_ptr     = new_tokens.data_ptr<int>();  // [batch_size, max_num_new_tokens]
-    auto       max_num_new_tokens = new_tokens.size(1);
-    const auto get_new_token_id   = [&](auto batch_idx, auto token_idx) {
-        if (is_beam_search) {
+    auto new_tokens_ptr     = new_tokens.data_ptr<int>();  // [batch_size, max_num_new_tokens]
+    auto max_num_new_tokens = new_tokens.size(1);
+    if (tokens_are_complete_sequences) {
+        RTP_LLM_CHECK_WITH_INFO(seq_length_ + num_new_tokens <= max_num_new_tokens,
+                                "complete token history is too short, need at least %ld columns, found %ld",
+                                static_cast<int64_t>(seq_length_ + num_new_tokens),
+                                max_num_new_tokens);
+        RTP_LLM_CHECK_WITH_INFO(max_num_new_tokens <= complete_token_ids_.size(1),
+                                "complete token history is too long, expect at most %ld columns, found %ld",
+                                complete_token_ids_.size(1),
+                                max_num_new_tokens);
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(max_num_new_tokens >= num_new_tokens,
+                                "incremental token layout needs at least %d columns, found %ld",
+                                num_new_tokens,
+                                max_num_new_tokens);
+    }
+    const auto get_token_id = [&](auto batch_idx, auto token_idx) {
+        if (tokens_are_complete_sequences) {
             return (new_tokens_ptr + max_num_new_tokens * batch_idx)[seq_length_ + token_idx];
         } else {
-            return (new_tokens_ptr + num_new_tokens * batch_idx)[token_idx];
+            return (new_tokens_ptr + max_num_new_tokens * batch_idx)[token_idx];
         }
     };
 
     for (size_t i = 0; i < new_batch_size; ++i) {
         for (size_t j = 0; j < num_new_tokens; ++j) {
-            auto current_token_id = get_new_token_id(i, j);
+            auto current_token_id = get_token_id(i, j);
             if (!(current_token_id >= 0 && current_token_id < vocab_size)) {  // check tokenid
                 error_token_id = current_token_id;
                 return false;
             }
         }
-        if (is_beam_search) {
-            const size_t copy_end =
-                std::min(static_cast<size_t>(max_num_new_tokens), static_cast<size_t>(complete_token_ids_.size(1)));
-            RTP_LLM_CHECK(copy_end >= static_cast<size_t>(common_len_));
-            memcpy(data(i) + common_len_,
-                   new_tokens_ptr + i * max_num_new_tokens + common_len_,
-                   sizeof(int) * (copy_end - common_len_));
+        if (tokens_are_complete_sequences) {
+            memcpy(data(i), new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * max_num_new_tokens);
         } else {
-            memcpy(data(i) + seq_length_, new_tokens_ptr + i * num_new_tokens, sizeof(int) * num_new_tokens);
+            if (batch_size_ != new_batch_size && i > 0) {
+                memcpy(data(i), data(0), sizeof(int) * seq_length_);
+            }
+            memcpy(data(i) + seq_length_, new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * num_new_tokens);
         }
     }
     batch_size_ = new_batch_size;

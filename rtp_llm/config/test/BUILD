@@ -14,3 +14,10 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "output_vocab_config_test",
+    srcs = ["output_vocab_config_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)

@@ -758,6 +758,15 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         if (device_props_.tp_size > 1) {
             logits = tpSyncEmbeddingOrLogits(logits);
         }
+        if (output_vocab_size_ > 0) {
+            RTP_LLM_CHECK_WITH_INFO(logits.size(1) >= static_cast<int64_t>(output_vocab_size_),
+                                    "LM Head logits width [%ld] is smaller than output vocabulary size [%zu]",
+                                    logits.size(1),
+                                    output_vocab_size_);
+            if (logits.size(1) > static_cast<int64_t>(output_vocab_size_)) {
+                logits = logits.narrow(1, 0, output_vocab_size_).contiguous();
+            }
+        }
         if (check_nan_) {
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");

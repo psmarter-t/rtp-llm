@@ -9,7 +9,7 @@ using namespace std;
 
 namespace rtp_llm {
 
-const float BaseLogitsProcessor::neg_inf = -std::numeric_limits<float>::max();
+const float BaseLogitsProcessor::neg_inf = -std::numeric_limits<float>::infinity();
 
 void BaseLogitsProcessor::memFill(const torch::Tensor& new_tokens_logits, size_t vocab_size, size_t index) {
     RTP_LLM_CHECK(new_tokens_logits.dim() == 1);

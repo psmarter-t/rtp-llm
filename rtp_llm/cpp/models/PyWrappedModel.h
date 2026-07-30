@@ -79,6 +79,7 @@ private:
     const rtp_llm::ExecProperties                   device_props_;
     const rtp_llm::MlaOpsType                       mla_ops_type_;
     const size_t                                    layer_num_;
+    const size_t                                    output_vocab_size_;
     const GptModelDescription                       description_;
     std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
     std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
@@ -114,6 +115,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
+    output_vocab_size_(params.output_vocab_size),
     description_(params.description),
     cache_manager_(params.cache_manager),
     enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),

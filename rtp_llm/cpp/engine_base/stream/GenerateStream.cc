@@ -12,8 +12,10 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/config/GenerationLimits.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/models/logits_processor/PrefixToCandidateTokens.h"
 #include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 
 using namespace std;
@@ -92,8 +94,88 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
+    if (generateConfig()->no_repeat_ngram_size.has_value()
+        && (generateConfig()->no_repeat_ngram_size.value() < 0
+            || generateConfig()->no_repeat_ngram_size.value() > kMaxNoRepeatNgramSize)) {
+        reportError(ErrorCode::INVALID_PARAMS,
+                    "no_repeat_ngram_size must be in [0, " + std::to_string(kMaxNoRepeatNgramSize) + "]");
+        return;
+    }
+
+    if (generateConfig()->in_think_mode && generateConfig()->max_thinking_tokens > 0
+        && generateConfig()->end_think_token_ids.empty()) {
+        reportError(ErrorCode::INVALID_PARAMS,
+                    "think mode with max_thinking_tokens > 0 requires non-empty end_think_token_ids");
+        return;
+    }
+
+    if (generateConfig()->in_think_mode && generateConfig()->max_thinking_tokens > 0 && hasNumBeams()
+        && generateConfig()->max_thinking_tokens <= generateConfig()->max_new_tokens) {
+        const int first_forced_output_len = generateConfig()->max_thinking_tokens - 1;
+        const int last_forced_output_len =
+            std::min(generateConfig()->max_new_tokens - 1,
+                     first_forced_output_len + static_cast<int>(generateConfig()->end_think_token_ids.size()) - 1);
+        for (int output_len = first_forced_output_len; output_len <= last_forced_output_len; ++output_len) {
+            const int beams_in  = numBeams(output_len);
+            const int beams_out = numBeams(output_len + 1);
+            if (beams_out > beams_in) {
+                reportError(ErrorCode::INVALID_PARAMS,
+                            "think-mode hard terminator cannot expand beam width from " + std::to_string(beams_in)
+                                + " to " + std::to_string(beams_out) + " at output length "
+                                + std::to_string(output_len));
+                return;
+            }
+        }
+    }
+
+    int64_t    sampler_eos_token_id = special_tokens_.eos_token_id;
+    const bool requires_multi_seq_processor =
+        generateConfig()->num_return_sequences > 1 || generateConfig()->hasNumBeams();
+    if (requires_multi_seq_processor
+        && (sampler_eos_token_id < 0 || sampler_eos_token_id >= static_cast<int64_t>(vocab_size_))) {
+        reportError(ErrorCode::INVALID_PARAMS,
+                    "beam search and multiple return sequences require an EOS token id in model vocabulary [0, "
+                        + std::to_string(vocab_size_) + "), got " + std::to_string(sampler_eos_token_id));
+        return;
+    }
+    if (resource_context.output_vocab_mapping) {
+        const auto& mapping = resource_context.output_vocab_mapping;
+        if (PrefixToCandidateTokens::instance()->initSuccess()) {
+            reportError(ErrorCode::INVALID_PARAMS, "output vocabulary pruning does not support tree decoding");
+            return;
+        }
+        const bool uses_end_think_tokens =
+            (generateConfig()->in_think_mode && generateConfig()->max_thinking_tokens > 0)
+            || generateConfig()->combo_token_size > 0;
+        if (uses_end_think_tokens) {
+            for (const auto token_id : generateConfig()->end_think_token_ids) {
+                if (!mapping->contains(token_id)) {
+                    reportError(ErrorCode::INVALID_PARAMS,
+                                "think/recommendation terminator token [" + std::to_string(token_id)
+                                    + "] is not present in the configured output vocabulary");
+                    return;
+                }
+            }
+        }
+        if (generateConfig()->hasNumBeams()
+            && mapping->size() <= static_cast<size_t>(2 * generateConfig()->maxNumBeams())) {
+            reportError(ErrorCode::INVALID_PARAMS,
+                        "configured output vocabulary size must be greater than twice the maximum beam width");
+            return;
+        }
+        if (sampler_eos_token_id >= 0) {
+            auto local_eos_token_id = mapping->toLocal(sampler_eos_token_id);
+            if (!local_eos_token_id.has_value()) {
+                reportError(ErrorCode::INVALID_PARAMS,
+                            "EOS token [" + std::to_string(sampler_eos_token_id)
+                                + "] is not present in the configured output vocabulary");
+                return;
+            }
+            sampler_eos_token_id = local_eos_token_id.value();
+        }
+    }
     logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, logits_processor_init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
+        generate_input_, logits_processor_init_batch_size, maxBatchSize(), sampler_eos_token_id);
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -241,6 +323,10 @@ int GenerateStream::currentNumBeams() const {
 
 int GenerateStream::nextNumBeams() const {
     return numBeams(outputTokenLen() + 1);
+}
+
+bool GenerateStream::usesBeamSearchTokenLayoutForCurrentStep() const {
+    return currentNumBeams() > 1 || nextNumBeams() > 1;
 }
 
 int GenerateStream::maxNumBeams() const {
@@ -777,7 +863,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                                      generate_input_->inputLength(),
                                      maxTokenNum(),
                                      vocab_size_,
-                                     hasNumBeams(),
+                                     false,  // speculative updates always carry incremental tokens
                                      streamId(),
                                      error_token_id)) {
         reportEventWithoutLock(StreamEvents::Error,
@@ -852,6 +938,9 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 
     const auto& new_tokens     = update_info.new_tokens;
     auto        num_new_tokens = update_info.num_new_tokens;
+    // Evaluate before CompleteTokenIds advances seqLength(): current/next beam
+    // widths describe the sampler output layout for this update.
+    const bool tokens_are_complete_sequences = usesBeamSearchTokenLayoutForCurrentStep();
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
@@ -860,7 +949,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                                      generate_input_->inputLength(),
                                      maxTokenNum(),
                                      vocab_size_,
-                                     hasNumBeams(),
+                                     tokens_are_complete_sequences,
                                      streamId(),
                                      error_token_id)) {
         reportEventWithoutLock(StreamEvents::Error,

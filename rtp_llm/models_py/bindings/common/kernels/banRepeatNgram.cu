@@ -15,6 +15,7 @@
  */
 
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
+#include "rtp_llm/cpp/config/GenerationLimits.h"
 
 #if USING_CUDA
 #include <cuda_fp16.h>
@@ -71,9 +72,10 @@ __global__ void ban_repeat_ngram(T*                   logits,
     // TODO(wangyin): remove this +1 when new fmha kernel is adopted.
     auto const step = sequence_lengths[batch_slot] + 1;
 
-    // case 1: ngram_size == 0 --> this means no ngram limit
-    // case 2: generated length must be greater than ngram_size to do ngram check
-    if (no_repeat_ngram_size == 0 || step < no_repeat_ngram_size) {
+    // Invalid values can reach this low-level kernel through direct C++ callers.
+    // Do not let them address beyond the fixed shared-memory allocation below.
+    if (no_repeat_ngram_size <= 0 || no_repeat_ngram_size > rtp_llm::kMaxNoRepeatNgramSize
+        || step < no_repeat_ngram_size) {
         return;
     }
 
@@ -129,8 +131,10 @@ __global__ void ban_repeat_ngram(T*                   logits,
     if (ban_ngram) {
         auto const banned_token =
             shared_tokens[threadIdx.x + no_repeat_ngram_size - 1];  // ban the last token in the ngram
-        logits[local_batch_idx * beam_width * vocab_size_padded + beam_idx * vocab_size_padded + banned_token] =
-            static_cast<T>(-INFINITY);  // note: "logits" passed in is already with batchxbeam offset
+        if (banned_token >= 0 && banned_token < vocab_size_padded) {
+            logits[local_batch_idx * beam_width * vocab_size_padded + beam_idx * vocab_size_padded + banned_token] =
+                static_cast<T>(-INFINITY);  // note: "logits" passed in is already with batchxbeam offset
+        }
     }
 }
 
@@ -152,7 +156,7 @@ void invokeBanRepeatNgram(T*                   logits,
     // getting the max of current batch and allocate shmem as needed is ideal. But here the ngram_buf is on GPU, while
     // this max value is on CPU for kernel launch. Instead of really finding the max and extra CPU-GPU memcpy, we simply
     // use a constant. In practice, ngram size is usually very small, like 3 or 4.
-    int max_no_repeat_ngram_size = 32;
+    constexpr int max_no_repeat_ngram_size = rtp_llm::kMaxNoRepeatNgramSize;
 
     // step (current generated length, except start token) is from 1 ~ max_seq_len
     dim3                 block, grid;

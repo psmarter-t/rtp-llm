@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/config/OutputVocabMapping.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace th = torch;
@@ -115,6 +116,7 @@ struct EngineInitParams {
     py::object                   py_sp_model;
     py::object                   weight_manager;
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
+    OutputVocabMappingPtr        output_vocab_mapping;
 
 public:
     void showDebugInfo() const {

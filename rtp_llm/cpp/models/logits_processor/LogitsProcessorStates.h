@@ -3,12 +3,13 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/config/OutputVocabMapping.h"
 
 namespace rtp_llm {
 
 class LogitsProcessorStates {
 public:
-    LogitsProcessorStates();
+    explicit LogitsProcessorStates(OutputVocabMappingPtr output_vocab_mapping = nullptr);
     virtual ~LogitsProcessorStates() {}
 
 public:
@@ -18,6 +19,7 @@ public:
 private:
     std::vector<BaseLogitsProcessorPtr>    logits_processors_;
     std::vector<std::pair<size_t, size_t>> intervals_;
+    OutputVocabMappingPtr                  output_vocab_mapping_;
 };
 
 typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;

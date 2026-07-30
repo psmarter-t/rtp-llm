@@ -2,6 +2,7 @@
 
 #include <list>
 #include <memory>
+#include <utility>
 
 #include <torch/all.h>
 #include "absl/status/status.h"
@@ -24,7 +25,22 @@ public:
                                const ProfilingDebugLoggingConfig&         profiling_debug_logging_config,
                                const CacheConfig&                         cache_config,
                                bool                                       warm_up,
-                               std::shared_ptr<autil::LockFreeThreadPool> thread_pool = nullptr);
+                               OutputVocabMappingPtr                      output_vocab_mapping = nullptr,
+                               std::shared_ptr<autil::LockFreeThreadPool> thread_pool          = nullptr);
+
+    NormalBatchStreamProcessor(const ModelConfig&                         model_config,
+                               const PDSepConfig&                         pd_sep_config,
+                               const ProfilingDebugLoggingConfig&         profiling_debug_logging_config,
+                               const CacheConfig&                         cache_config,
+                               bool                                       warm_up,
+                               std::shared_ptr<autil::LockFreeThreadPool> thread_pool):
+        NormalBatchStreamProcessor(model_config,
+                                   pd_sep_config,
+                                   profiling_debug_logging_config,
+                                   cache_config,
+                                   warm_up,
+                                   nullptr,
+                                   std::move(thread_pool)) {}
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const;

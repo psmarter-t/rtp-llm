@@ -79,6 +79,9 @@ cc_library(
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/utils:linear_blocks_util",
         "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:generation_limits",
+        "//rtp_llm/cpp/config:output_vocab_mapping",
     ],
     visibility = ["//visibility:public"],
 )

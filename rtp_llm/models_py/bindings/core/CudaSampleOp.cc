@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 
 #include <limits>
+#include <tuple>
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -104,6 +105,16 @@ RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSam
             static_cast<int>(num_speculative_tokens),
             static_cast<int>(target_vocab_size),
             static_cast<int>(target_token_stride)};
+}
+
+torch::Tensor validLogitsCandidates(const torch::Tensor& logits) {
+    auto row_max = std::get<0>(logits.max(-1));
+    return torch::isfinite(row_max).logical_and(row_max.gt(-std::numeric_limits<float>::max()));
+}
+
+torch::Tensor validSelectedLogits(const torch::Tensor& logits, const torch::Tensor& selected_tokens) {
+    auto selected_logits = logits.gather(-1, selected_tokens.unsqueeze(-1)).squeeze(-1);
+    return torch::isfinite(selected_logits).logical_and(selected_logits.gt(-std::numeric_limits<float>::max()));
 }
 
 }  // anonymous namespace
@@ -404,6 +415,10 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto device_tokens = params.token_ids.to(torch::kCUDA, true);
     // [step + 1, batch_size]
     auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
+    auto penalty_device_tokens =
+        params.penalty_token_ids.has_value() ? params.penalty_token_ids.value().to(torch::kCUDA, true) : device_tokens;
+    auto penalty_transposed_tokens =
+        params.penalty_token_ids.has_value() ? penalty_device_tokens.transpose(0, 1).contiguous() : transposed_tokens;
 
     const auto batch_size        = params.logits.size(0);
     bool       has_not_do_sample = params.do_sample.has_value()
@@ -422,7 +437,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
             mask_tensor        = do_sample_gpu.reshape({(int64_t)batch_size, 1}).logical_not();
             selected_logits    = params.logits.masked_select(mask_tensor);
         }
-        processLogits(params, device_tokens, transposed_tokens);
+        processLogits(params, penalty_device_tokens, penalty_transposed_tokens);
         if (has_not_do_sample) {
             params.logits.masked_scatter_(mask_tensor, selected_logits);
         }
@@ -431,20 +446,40 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // fast path for topk = 1
     auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
-        && !params.output_all_probs.has_value()) {
+        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
         torch::Tensor samples_t =
             transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
         torch::Tensor probs_t         = params.logits;
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens, true);
 
+        torch::Tensor valid_candidates;
+        if (params.validate_logits_candidates) {
+            valid_candidates = validSelectedLogits(params.logits, selected_tokens);
+        }
+
         auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
         params.token_ids.copy_(output_tokens, true);
 
-        return GreedyOutput{};
+        return {valid_candidates};
     }
 
-    return flashinferSampleGreedy(params, transposed_tokens);
+    torch::Tensor valid_candidates;
+    if (params.validate_logits_candidates) {
+        valid_candidates = validLogitsCandidates(params.logits);
+    }
+    if (valid_candidates.defined()) {
+        params.logits.masked_fill_(valid_candidates.logical_not().unsqueeze(-1), 0.0f);
+    }
+    auto output = flashinferSampleGreedy(params, transposed_tokens);
+    if (valid_candidates.defined()) {
+        if (output.success.defined()) {
+            output.success.logical_and_(valid_candidates);
+        } else {
+            output.success = valid_candidates;
+        }
+    }
+    return output;
 }
 
 void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
@@ -510,6 +545,27 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
                                        hipStream_t  stream);
 }  // namespace rtp_llm
 
+// Keep this declaration local: banRepeatNgram.h pulls in cuda_shims.h, which
+// cannot be included by this ROCm .cc compilation unit on the supported toolchain.
+namespace tensorrt_llm {
+namespace kernels {
+template<typename T>
+void invokeBanRepeatNgram(T*              logits,
+                          int32_t const** output_ids_buf,
+                          void const*     finished_buf,
+                          int32_t const** parent_ids_buf,
+                          int32_t const*  batch_slot,
+                          int32_t const*  sequence_lengths,
+                          int32_t         batch_size,
+                          int32_t         beam_width,
+                          int32_t         max_seq_len,
+                          int32_t const*  no_repeat_ngram_size_buf,
+                          int32_t         vocab_size_padded,
+                          int32_t         max_step,
+                          hipStream_t     stream);
+}  // namespace kernels
+}  // namespace tensorrt_llm
+
 #include <ATen/hip/HIPContext.h>
 #include "rtp_llm/models_py/bindings/rocm/kernels/sampling/sampling.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -529,6 +585,10 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto device_tokens = params.token_ids.to(torch::kCUDA);
     // [step + 1, batch_size]
     auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
+    auto penalty_device_tokens =
+        params.penalty_token_ids.has_value() ? params.penalty_token_ids.value().to(torch::kCUDA) : device_tokens;
+    auto penalty_transposed_tokens =
+        params.penalty_token_ids.has_value() ? penalty_device_tokens.transpose(0, 1).contiguous() : transposed_tokens;
 
     // 1. Apply temperature penalty
     if (std::any_of(params.temperature.data_ptr<float>(),
@@ -574,7 +634,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                                               repetition_penalty_gpu.data_ptr<float>(),
                                               presence_penalty_gpu.data_ptr<float>(),
                                               frequency_penalty_gpu.data_ptr<float>(),
-                                              transposed_tokens.data_ptr<int32_t>(),
+                                              penalty_transposed_tokens.data_ptr<int32_t>(),
                                               batch_size,
                                               batch_size,  // local_batch_size
                                               vocab_size_padded,
@@ -585,20 +645,63 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         }
     }
 
+    if (decoder_batch_size && params.no_repeat_ngram_size.has_value()) {
+        const auto& no_repeat_ngram_size = params.no_repeat_ngram_size.value();
+        if (std::any_of(no_repeat_ngram_size.data_ptr<int32_t>(),
+                        no_repeat_ngram_size.data_ptr<int32_t>() + decoder_batch_size,
+                        [](auto size) { return size != 0; })) {
+            auto no_repeat_ngram_size_gpu = no_repeat_ngram_size.to(torch::kCUDA);
+            auto output_ids_ptrs = torch::empty({decoder_batch_size}, torch::TensorOptions().dtype(torch::kInt64));
+            for (int64_t i = 0; i < decoder_batch_size; ++i) {
+                output_ids_ptrs.data_ptr<int64_t>()[i] =
+                    reinterpret_cast<int64_t>(penalty_device_tokens.data_ptr<int32_t>() + i * (step + 1));
+            }
+            auto output_ids_ptrs_gpu  = output_ids_ptrs.to(torch::kCUDA);
+            auto sequence_lengths_gpu = params.sequence_lengths.to(torch::kCUDA);
+            tensorrt_llm::kernels::invokeBanRepeatNgram(
+                params.logits.data_ptr<float>(),
+                reinterpret_cast<int32_t const**>(output_ids_ptrs_gpu.data_ptr()),
+                nullptr,
+                nullptr,
+                nullptr,
+                sequence_lengths_gpu.data_ptr<int32_t>(),
+                decoder_batch_size,
+                1,
+                step + 1,
+                no_repeat_ngram_size_gpu.data_ptr<int32_t>(),
+                vocab_size_padded,
+                step + 1,
+                cur_stream);
+        }
+    }
+
     // 3. Fast path for topk = 1
     auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
-        && !params.output_all_probs.has_value()) {
+        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
         torch::Tensor samples_t =
             transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
         torch::Tensor probs_t         = params.logits;
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
 
+        torch::Tensor valid_candidates;
+        if (params.validate_logits_candidates) {
+            valid_candidates = validSelectedLogits(params.logits, selected_tokens);
+        }
+
         auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
         params.token_ids.copy_(output_tokens);
 
-        return GreedyOutput{};
+        return {valid_candidates};
+    }
+
+    torch::Tensor valid_candidates;
+    if (params.validate_logits_candidates) {
+        valid_candidates = validLogitsCandidates(params.logits);
+    }
+    if (valid_candidates.defined()) {
+        params.logits.masked_fill_(valid_candidates.logical_not().unsqueeze(-1), 0.0f);
     }
 
     // 4. Compute softmax probabilities
@@ -621,7 +724,6 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto top_p_t   = params.top_p;
     auto top_p_ptr = params.top_p.data_ptr<float>();
 
-    bool          need_renorm_probs = params.output_all_probs.has_value() && !params.return_original_all_probs;
     torch::Tensor output_all_probs_t;
     if (params.output_all_probs.has_value()) {
         output_all_probs_t = params.output_all_probs.value();
@@ -629,15 +731,21 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     if (params.cum_log_probs.has_value() && !output_all_probs_t.defined()) {
         output_all_probs_t = torch::zeros_like(probs_t);
     }
+    const bool need_renorm_probs = output_all_probs_t.defined() && !params.return_original_all_probs;
 
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
 
     // 6. Sample
+    torch::Tensor sampled_probs_t;
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
         if (need_renorm_probs) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(cur_stream));
+        }
+        if (params.cum_log_probs.has_value() && !params.return_original_all_probs) {
+            sampled_probs_t = torch::zeros_like(probs_t);
+            sampled_probs_t.scatter_(1, selected_tokens.unsqueeze(1), 1.0f);
         }
     } else {
         // Use pure PyTorch sampling instead of FlashInfer ROCm kernels.
@@ -647,7 +755,9 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         // torch::multinomial is well-tested and handles all cases correctly.
         //
         // Apply top_k filtering if needed
-        auto filtered_probs = probs_t;
+        // Keep raw probabilities intact for ReturnAllProbsMode::ORIGINAL and
+        // derive cumulative log-probability from the normalized sampling distribution.
+        auto filtered_probs = probs_t.clone();
         bool has_top_k      = !std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
         if (has_top_k) {
             for (int64_t b = 0; b < (int64_t)batch_size; b++) {
@@ -677,9 +787,10 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
             }
         }
         // Re-normalize and sample
-        auto row_sums  = filtered_probs.sum(-1, /*keepdim=*/true);
-        filtered_probs = filtered_probs / row_sums.clamp_min(1e-10);
-        auto selected  = torch::multinomial(filtered_probs, 1, /*replacement=*/false).squeeze(-1);
+        auto row_sums   = filtered_probs.sum(-1, /*keepdim=*/true);
+        filtered_probs  = filtered_probs / row_sums.clamp_min(1e-10);
+        sampled_probs_t = filtered_probs;
+        auto selected   = torch::multinomial(filtered_probs, 1, /*replacement=*/false).squeeze(-1);
         samples_t.copy_(selected);
         if (need_renorm_probs) {
             output_all_probs_t.copy_(filtered_probs);
@@ -687,19 +798,23 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     }
 
     if (params.return_original_all_probs && output_all_probs_t.defined()) {
-        top_k_renorm_probs(probs_t, output_all_probs_t, std::nullopt, 1 << 30, reinterpret_cast<uintptr_t>(cur_stream));
+        output_all_probs_t.copy_(probs_t);
     }
 
     // 7. Update cum_log_probs
     if (params.cum_log_probs.has_value()) {
-        auto cum_log_probs_t = params.cum_log_probs.value();
-        cum_log_probs_t.add_(probs_t.log());
+        auto        cum_log_probs_t = params.cum_log_probs.value();
+        const auto& probs_for_log   = params.return_original_all_probs ? probs_t : sampled_probs_t;
+        RTP_LLM_CHECK_WITH_INFO(probs_for_log.defined(),
+                                "sampling probabilities must be defined for cumulative log probabilities");
+        auto token_probs_t = probs_for_log.gather(1, samples_t.unsqueeze(1).to(torch::kLong)).squeeze(1);
+        cum_log_probs_t.add_(token_probs_t.log().to(cum_log_probs_t.device()));
     }
 
     // 8. Copy results back
     auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
     params.token_ids.copy_(output_tokens);
-    return GreedyOutput{};
+    return {valid_candidates};
 }
 
 }  // namespace rtp_llm

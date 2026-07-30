@@ -37,6 +37,9 @@ from rtp_llm.server.server_args.model_specific_group_args import (
     init_model_specific_group_args,
 )
 from rtp_llm.server.server_args.moe_group_args import init_moe_group_args
+from rtp_llm.server.server_args.output_vocab_group_args import (
+    init_output_vocab_group_args,
+)
 from rtp_llm.server.server_args.parallel_group_args import init_parallel_group_args
 from rtp_llm.server.server_args.pd_separation_group_args import (
     init_pd_separation_group_args,
@@ -452,6 +455,7 @@ def init_all_group_args(
     init_master_group_args(parser, py_env_configs.master_config)
     init_misc_group_args(parser, py_env_configs.misc_config)
     init_model_group_args(parser, py_env_configs.model_args)
+    init_output_vocab_group_args(parser, py_env_configs.output_vocab_config)
     init_model_specific_group_args(parser, py_env_configs.model_specific_config)
     init_moe_group_args(
         parser,

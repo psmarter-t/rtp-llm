@@ -33,6 +33,8 @@ class ServerArgsSetTest(TestCase):
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
+        os.environ["OUTPUT_VOCAB_CONFIG_PATH"] = "/path/to/output-vocab.json"
+        os.environ["OUTPUT_VOCAB_MODEL_IDENTITY"] = "model@revision"
 
         sys.argv = ["prog"]
 
@@ -46,6 +48,13 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.model_args.model_type, "qwen")
         self.assertEqual(py_env_configs.model_args.ckpt_path, "/path/to/checkpoint")
         self.assertEqual(py_env_configs.model_args.act_type, "BF16")
+        self.assertEqual(
+            py_env_configs.output_vocab_config.config_path,
+            "/path/to/output-vocab.json",
+        )
+        self.assertEqual(
+            py_env_configs.output_vocab_config.model_identity, "model@revision"
+        )
 
         # Verify parallelism_config
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 4)
@@ -103,6 +112,10 @@ class ServerArgsSetTest(TestCase):
             "false",
             "--disable_flashinfer_native",
             "true",
+            "--output_vocab_config_path",
+            "/path/to/output-vocab.json",
+            "--output_vocab_model_identity",
+            "model@revision",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -119,6 +132,13 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.model_args.ckpt_path, "/path/to/llama/checkpoint"
         )
         self.assertEqual(py_env_configs.model_args.act_type, "FP16")
+        self.assertEqual(
+            py_env_configs.output_vocab_config.config_path,
+            "/path/to/output-vocab.json",
+        )
+        self.assertEqual(
+            py_env_configs.output_vocab_config.model_identity, "model@revision"
+        )
 
         # Verify parallelism_config
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 8)
