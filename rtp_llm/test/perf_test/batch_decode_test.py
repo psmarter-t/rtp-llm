@@ -12,10 +12,15 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from rtp_llm.test.perf_test.dataclass import PerfTestConfig
+from rtp_llm.test.perf_test.dataclass import (
+    MetricState,
+    PerfTestConfig,
+    TableType,
+    create_metrics_table,
+)
+from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.perf_test.distribution_runner import DistributionRunner
 from rtp_llm.test.perf_test.grid_runner import GridRunner
-from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.perf_test.perf_config import (
     parse_args,
     prepare_config,
@@ -74,6 +79,7 @@ def _run_prefill(
     dp_size: int,
     config: PerfTestConfig,
     input_query_dict: Dict[int, str],
+    tp_size: int = 1,
     **kwargs: Any,
 ) -> None:
     if not config.input_len_list:
@@ -85,6 +91,7 @@ def _run_prefill(
         config.input_len_list,
         input_query_dict,
         is_decode=False,
+        tp_size=tp_size,
         **kwargs,
     ).run()
 
@@ -96,6 +103,7 @@ def _run_decode(
     config: PerfTestConfig,
     input_query_dict: Dict[int, str],
     engine_status: Dict[str, Any],
+    tp_size: int = 1,
     **kwargs: Any,
 ) -> None:
     max_kv = (
@@ -134,6 +142,7 @@ def _run_decode(
                 **kwargs,
             ).run()
         else:
+            all_metrics: List[MetricState] = []
             for input_len in config.input_len_list:
                 filtered_bs = filter_bs_by_kvcache(
                     config.batch_size_list, input_len, max_kv
@@ -143,20 +152,42 @@ def _run_decode(
                         f"No BS fits KV cache for input_len={input_len}, skipping"
                     )
                     continue
-                GridRunner(
+                metrics = GridRunner(
                     port,
                     dp_size,
                     filtered_bs,
                     [input_len],
                     input_query_dict,
                     is_decode=True,
+                    tp_size=tp_size,
                     **kwargs,
-                ).run()
+                ).run(write_results=False)
+                all_metrics.extend(metrics)
+
+            if not all_metrics:
+                raise RuntimeError(
+                    "decode perf produced no measurements after KV-cache filtering"
+                )
+            metrics_table = create_metrics_table(
+                TableType.Decode,
+                all_metrics,
+                kwargs.get("dump_json_path", "."),
+                {"dp_size": dp_size, "tp_size": tp_size},
+                "Decode Result",
+                kwargs.get("generate_config"),
+            )
+            logging.info("metrics_table: \n" + str(metrics_table))
 
 
 # ---------------------------------------------------------------------------
 #  Main
 # ---------------------------------------------------------------------------
+
+
+def _runner_tp_size(remaining: List[str]) -> int:
+    """Return the TP size forwarded to the engine for result metadata."""
+    value = extract_arg(remaining, "tp_size", "1")
+    return int(value or "1")
 
 
 def main() -> str:
@@ -195,6 +226,7 @@ def main() -> str:
         runner_kwargs = dict(
             dump_json_path=args.result_dir,
             decode_test_length=args.decode_test_length,
+            tp_size=_runner_tp_size(remaining),
             generate_config=generate_config,
             num_measures=args.num_measures,
         )
@@ -215,9 +247,8 @@ def main() -> str:
                 **runner_kwargs,
             )
 
-        # Cleanup
+        # Persist successful-run artifacts before optional visualization.
         collect_timeline_files(args.result_dir)
-        server.stop()
         write_test_info(args, remaining)
 
         if args.partial != 2:
@@ -228,7 +259,10 @@ def main() -> str:
             except Exception as e:
                 logging.warning(f"plot_decode_results failed: {e}")
     finally:
-        summarize_and_cleanup_coredumps(args.result_dir)
+        try:
+            server.stop()
+        finally:
+            summarize_and_cleanup_coredumps(args.result_dir)
 
     return args.result_dir
 

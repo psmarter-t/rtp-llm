@@ -7,8 +7,27 @@ from rtp_llm.test.perf_test.batch_perf_impl import BatchPerfImpl
 from rtp_llm.test.perf_test.dataclass import (
     MetricState,
     TableType,
+    TestResultMetrics,
     create_metrics_table,
 )
+
+
+def require_complete_success(
+    metrics: TestResultMetrics,
+    batch_size: Optional[int] = None,
+    input_len: Optional[int] = None,
+    *,
+    context: Optional[str] = None,
+) -> None:
+    if (
+        metrics.total_requests <= 0
+        or metrics.success_requests != metrics.total_requests
+    ):
+        point = context or f"batch_size={batch_size}, input_len={input_len}"
+        raise RuntimeError(
+            f"perf point failed: {point}, "
+            f"success={metrics.success_requests}/{metrics.total_requests}"
+        )
 
 
 class GridRunner:
@@ -60,7 +79,7 @@ class GridRunner:
             self._generate_config,
         ).run()
 
-    def run(self) -> List[MetricState]:
+    def run(self, write_results: bool = True) -> List[MetricState]:
         """Warmup then iterate batch_size x input_len, return metrics."""
         self.warmup()
         logging.info("start to run perf test")
@@ -92,17 +111,19 @@ class GridRunner:
                         self._generate_config,
                         trace_name,
                     ).run(num_measures=self._num_measures)
+                    require_complete_success(metric, batch_size, input_len)
                     metrics_list.append(MetricState(input_len, batch_size, metric))
 
                     pbar.update(1)
 
-        metrics_table = create_metrics_table(
-            TableType.Decode if self._is_decode else TableType.Prefill,
-            metrics_list,
-            self._dump_json_path,
-            {"dp_size": self._dp_size, "tp_size": self._tp_size},
-            self._title,
-            self._generate_config,
-        )
-        logging.info("metrics_table: \n" + str(metrics_table))
+        if write_results:
+            metrics_table = create_metrics_table(
+                TableType.Decode if self._is_decode else TableType.Prefill,
+                metrics_list,
+                self._dump_json_path,
+                {"dp_size": self._dp_size, "tp_size": self._tp_size},
+                self._title,
+                self._generate_config,
+            )
+            logging.info("metrics_table: \n" + str(metrics_table))
         return metrics_list

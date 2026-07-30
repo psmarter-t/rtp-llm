@@ -141,7 +141,19 @@ class BatchPerfImpl(object):
         self._set_concurrency()
         _ = self._curl_server()  # warmup
 
-        measurements = [self._curl_server() for _ in range(num_measures)]
+        measurements = []
+        for measure_idx in range(num_measures):
+            measurement = self._curl_server()
+            if (
+                measurement.total_requests <= 0
+                or measurement.success_requests != measurement.total_requests
+            ):
+                raise RuntimeError(
+                    f"perf measurement {measure_idx + 1}/{num_measures} failed: "
+                    f"success={measurement.success_requests}/"
+                    f"{measurement.total_requests}"
+                )
+            measurements.append(measurement)
         key = "avg_decode_time" if self.is_decode else "avg_prefill_time"
         measurements.sort(key=lambda m: getattr(m, key))
         values = [f"{getattr(m, key):.2f}" for m in measurements]

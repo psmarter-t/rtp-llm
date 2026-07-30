@@ -9,14 +9,24 @@ Tests:
 
 import argparse
 import asyncio
+import contextlib
 import os
 import sys
+import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.test.perf_test.batch_decode_test import _run_decode, _run_prefill
-from rtp_llm.test.perf_test.dataclass import PerfTestConfig
+from rtp_llm.test.perf_test import batch_decode_test, test_entry
+from rtp_llm.test.perf_test.batch_decode_test import (
+    _run_decode,
+    _run_prefill,
+    _runner_tp_size,
+)
+from rtp_llm.test.perf_test.batch_perf_impl import BatchPerfImpl
+from rtp_llm.test.perf_test.dataclass import PerfTestConfig, TestResultMetrics
+from rtp_llm.test.perf_test.distribution_runner import DistributionRunner
+from rtp_llm.test.perf_test.grid_runner import require_complete_success
 from rtp_llm.test.perf_test.perf_config import prepare_config as _prepare_config
 from rtp_llm.test.perf_test.perf_utils import (
     auto_generate_bs_list as _auto_generate_bs_list,
@@ -146,6 +156,7 @@ class TestRunPrefill(unittest.TestCase):
             [128, 256],
             query_dict,
             is_decode=False,
+            tp_size=1,
             dump_json_path="/tmp",
         )
         mock_runner.run.assert_called_once()
@@ -193,9 +204,11 @@ class TestRunDecode(unittest.TestCase):
         )
 
     # --- Mode 1: decode × grid ---
+    @patch("rtp_llm.test.perf_test.batch_decode_test.create_metrics_table")
     @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
-    def test_decode_grid(self, MockGridRunner):
+    def test_decode_grid(self, MockGridRunner, mock_create_metrics_table):
         mock_runner = MagicMock()
+        mock_runner.run.return_value = [MagicMock()]
         MockGridRunner.return_value = mock_runner
 
         args = _make_args(target_tpot=0)
@@ -214,10 +227,79 @@ class TestRunDecode(unittest.TestCase):
         self.assertEqual(c1[0][2], [1, 8, 16])
         self.assertEqual(c1[0][3], [128])
         self.assertTrue(c1[1]["is_decode"])
+        self.assertEqual(c1[1]["tp_size"], 1)
         # input_len=256: only [1, 8]
         c2 = MockGridRunner.call_args_list[1]
         self.assertEqual(c2[0][2], [1, 8])
         self.assertEqual(c2[0][3], [256])
+        self.assertEqual(
+            mock_runner.run.call_args_list,
+            [unittest.mock.call(write_results=False)] * 2,
+        )
+        mock_create_metrics_table.assert_called_once()
+
+    @patch("rtp_llm.test.perf_test.batch_decode_test.create_metrics_table")
+    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
+    def test_decode_grid_writes_all_input_lengths_once(
+        self, MockGridRunner, mock_create_metrics_table
+    ):
+        first_runner = MagicMock()
+        second_runner = MagicMock()
+        first_metrics = [MagicMock(name="input_128_bs_1")]
+        second_metrics = [
+            MagicMock(name="input_256_bs_1"),
+            MagicMock(name="input_256_bs_8"),
+        ]
+        first_runner.run.return_value = first_metrics
+        second_runner.run.return_value = second_metrics
+        MockGridRunner.side_effect = [first_runner, second_runner]
+
+        _run_decode(
+            8000,
+            1,
+            _make_args(target_tpot=0),
+            self._grid_config(),
+            {128: "q128", 256: "q256"},
+            {"max_kv_tokens": 4096},
+            tp_size=2,
+            dump_json_path="/tmp/all-input-lengths",
+            generate_config={"num_beams": 4},
+        )
+
+        first_runner.run.assert_called_once_with(write_results=False)
+        second_runner.run.assert_called_once_with(write_results=False)
+        mock_create_metrics_table.assert_called_once_with(
+            unittest.mock.ANY,
+            first_metrics + second_metrics,
+            "/tmp/all-input-lengths",
+            {"dp_size": 1, "tp_size": 2},
+            "Decode Result",
+            {"num_beams": 4},
+        )
+
+    @patch("rtp_llm.test.perf_test.batch_decode_test.create_metrics_table")
+    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
+    def test_decode_grid_forwards_tp_size_to_result_writer(
+        self, MockGridRunner, mock_create_metrics_table
+    ):
+        MockGridRunner.return_value.run.return_value = [MagicMock()]
+        args = _make_args(target_tpot=0)
+        config = self._grid_config()
+
+        _run_decode(
+            8000,
+            1,
+            args,
+            config,
+            {128: "q128", 256: "q256"},
+            {"max_kv_tokens": 4096},
+            tp_size=2,
+        )
+
+        self.assertEqual(MockGridRunner.call_count, 2)
+        for call in MockGridRunner.call_args_list:
+            self.assertEqual(call.kwargs["tp_size"], 2)
+        mock_create_metrics_table.assert_called_once()
 
     @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
     def test_decode_grid_kv_skip(self, MockGridRunner):
@@ -232,10 +314,31 @@ class TestRunDecode(unittest.TestCase):
             max_concurrency=16,
         )
         # 8*4096=32768 > 1000
-        _run_decode(
-            8000, 1, args, config, {}, {"max_kv_tokens": 1000}, dump_json_path="/tmp"
-        )
+        with self.assertRaisesRegex(RuntimeError, "produced no measurements"):
+            _run_decode(
+                8000,
+                1,
+                args,
+                config,
+                {},
+                {"max_kv_tokens": 1000},
+                dump_json_path="/tmp",
+            )
         MockGridRunner.assert_not_called()
+
+    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
+    def test_decode_grid_rejects_empty_runner_metrics(self, MockGridRunner):
+        MockGridRunner.return_value.run.return_value = []
+
+        with self.assertRaisesRegex(RuntimeError, "produced no measurements"):
+            _run_decode(
+                8000,
+                1,
+                _make_args(target_tpot=0),
+                self._grid_config(),
+                {128: "q128", 256: "q256"},
+                {"max_kv_tokens": 4096},
+            )
 
     # --- Mode 2: decode × distribution ---
     @patch("rtp_llm.test.perf_test.batch_decode_test.DistributionRunner")
@@ -305,9 +408,132 @@ class TestRunDecode(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Batch decode lifecycle and baseline validation
+# ---------------------------------------------------------------------------
+class TestBatchDecodeLifecycle(unittest.TestCase):
+    def test_run_failure_stops_server(self):
+        config = PerfTestConfig(
+            is_distribution=False,
+            all_seq_lens=[128],
+            batch_size_list=[1],
+            input_len_list=[128],
+            max_seq_len=138,
+            max_concurrency=1,
+        )
+        server = MagicMock()
+        server.port = 18088
+        server_cls = MagicMock(return_value=server)
+        run_decode = MagicMock(side_effect=RuntimeError("runner failed"))
+        cleanup = MagicMock()
+
+        with tempfile.TemporaryDirectory() as result_dir:
+            args = _make_args(
+                result_dir=result_dir,
+                partial=1,
+                num_measures=1,
+                generate_config="{}",
+            )
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch("rtp_llm.config.log_config.setup_logging"))
+                stack.enter_context(
+                    patch.object(
+                        batch_decode_test, "parse_args", return_value=(args, [])
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        batch_decode_test,
+                        "resolve_perf_engine_paths",
+                        return_value=[],
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        batch_decode_test, "prepare_config", return_value=config
+                    )
+                )
+                stack.enter_context(
+                    patch.object(batch_decode_test, "EngineServer", server_cls)
+                )
+                stack.enter_context(
+                    patch.object(
+                        batch_decode_test, "query_engine_status", return_value={}
+                    )
+                )
+                stack.enter_context(
+                    patch.object(batch_decode_test, "print_config_table")
+                )
+                stack.enter_context(
+                    patch.object(
+                        batch_decode_test, "create_query", return_value={128: "q"}
+                    )
+                )
+                stack.enter_context(
+                    patch.object(batch_decode_test, "_run_decode", run_decode)
+                )
+                stack.enter_context(
+                    patch.object(
+                        batch_decode_test,
+                        "summarize_and_cleanup_coredumps",
+                        cleanup,
+                    )
+                )
+
+                with self.assertRaisesRegex(RuntimeError, "runner failed"):
+                    batch_decode_test.main()
+
+        run_decode.assert_called_once()
+        server.stop.assert_called_once()
+        cleanup.assert_called_once_with(result_dir)
+
+
+class TestPerfBaselineValidation(unittest.TestCase):
+    def test_missing_baseline_file_is_an_error(self):
+        with tempfile.TemporaryDirectory() as result_dir:
+            missing_path = os.path.join(result_dir, "missing-baseline.json")
+            with self.assertRaisesRegex(FileNotFoundError, "Baseline file not found"):
+                test_entry._load_baseline(missing_path)
+
+    def test_decode_baseline_rejects_empty_results(self):
+        baseline = {"decode_times": {"bs1_seq128": 1.0}}
+        with patch.object(
+            test_entry, "_load_baseline", return_value=baseline
+        ), patch.object(test_entry, "_collect_decode_times", return_value={}):
+            self.assertFalse(
+                test_entry.validate_against_baseline("/tmp/results", "baseline.json")
+            )
+
+    def test_decode_baseline_rejects_missing_key(self):
+        baseline = {"decode_times": {"bs1_seq128": 1.0, "bs2_seq128": 1.5}}
+        current = {"bs1_seq128": 1.0}
+        with patch.object(
+            test_entry, "_load_baseline", return_value=baseline
+        ), patch.object(test_entry, "_collect_decode_times", return_value=current):
+            self.assertFalse(
+                test_entry.validate_against_baseline("/tmp/results", "baseline.json")
+            )
+
+    def test_tps_baseline_rejects_missing_key(self):
+        baseline = {"tps": {"bs1_seq128": 100.0, "bs2_seq128": 180.0}}
+        with patch.object(
+            test_entry,
+            "_collect_tps_results",
+            return_value={"bs1_seq128": 100.0},
+        ):
+            self.assertFalse(
+                test_entry.validate_tps_against_baseline("/tmp/results", baseline)
+            )
+
+
+# ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
 class TestHelpers(unittest.TestCase):
+    def test_runner_tp_size_matches_forwarded_engine_arg(self):
+        self.assertEqual(_runner_tp_size(["--tp_size", "2"]), 2)
+        self.assertEqual(_runner_tp_size(["--tp_size=4"]), 4)
+        self.assertEqual(_runner_tp_size([]), 1)
+
     def test_auto_generate_bs_list(self):
         bs = _auto_generate_bs_list(128)
         self.assertEqual(bs[0], 1)
@@ -333,6 +559,62 @@ class TestHelpers(unittest.TestCase):
             _filter_bs_by_kvcache([8, 16], 4096, 1000),
             [],
         )
+
+    def test_grid_result_requires_all_requests_to_succeed(self):
+        require_complete_success(
+            TestResultMetrics(total_requests=2, success_requests=2, fail_requests=0),
+            batch_size=2,
+            input_len=128,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "batch_size=2, input_len=128, success=1/2"
+        ):
+            require_complete_success(
+                TestResultMetrics(
+                    total_requests=2, success_requests=1, fail_requests=1
+                ),
+                batch_size=2,
+                input_len=128,
+            )
+
+    def test_grid_result_rejects_zero_submitted_requests(self):
+        with self.assertRaisesRegex(RuntimeError, "success=0/0"):
+            require_complete_success(
+                TestResultMetrics(
+                    total_requests=0, success_requests=0, fail_requests=0
+                ),
+                batch_size=1,
+                input_len=128,
+            )
+
+    def test_batch_perf_rejects_failed_measurement_before_outlier_trim(self):
+        def metric(decode_time, success_requests=4):
+            return TestResultMetrics(
+                total_requests=4,
+                success_requests=success_requests,
+                fail_requests=4 - success_requests,
+                avg_decode_time=decode_time,
+            )
+
+        for failed_position, measurements in (
+            (1, [metric(1.0, 3), metric(2.0), metric(3.0)]),
+            (3, [metric(1.0), metric(2.0), metric(3.0, 3)]),
+        ):
+            with self.subTest(failed_position=failed_position):
+                runner = BatchPerfImpl.__new__(BatchPerfImpl)
+                runner.is_decode = True
+                runner.profile = False
+                runner._set_concurrency = MagicMock()
+                runner._curl_server = MagicMock(
+                    side_effect=[metric(0.0)] + measurements
+                )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    rf"measurement {failed_position}/3 failed: success=3/4",
+                ):
+                    runner.run(num_measures=3)
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +648,39 @@ class TestTpsBsCandidates(unittest.TestCase):
     def test_max_bs_4(self):
         candidates = TpsBinarySearchRunner._make_bs_candidates(4)
         self.assertEqual(candidates, [1, 4])
+
+    def test_search_rejects_when_every_measurement_has_failed_requests(self):
+        runner = TpsBinarySearchRunner(8000, 1, target_tpot=30, max_bs=4)
+        with patch.object(runner, "_test_bs", return_value=(False, 10.0, 0.5)):
+            with self.assertRaisesRegex(RuntimeError, "no valid measurement"):
+                runner._binary_search(lambda _bs: "query", "seq128")
+
+    def test_search_can_validly_miss_tpot_with_complete_requests(self):
+        runner = TpsBinarySearchRunner(8000, 1, target_tpot=30, max_bs=4)
+        with patch.object(runner, "_test_bs", return_value=(False, 40.0, 1.0)):
+            result = runner._binary_search(lambda _bs: "query", "seq128")
+        self.assertEqual(result.best_bs, 0)
+        self.assertEqual(result.tps, 0.0)
+
+
+class TestDistributionFailurePolicy(unittest.TestCase):
+    @patch.object(DistributionRunner, "warmup")
+    @patch("rtp_llm.test.perf_test.distribution_runner.BatchPerfImpl")
+    def test_rejects_partial_request_success(self, MockBatchPerfImpl, _mock_warmup):
+        MockBatchPerfImpl.return_value.run.return_value = TestResultMetrics(
+            total_requests=4,
+            success_requests=3,
+            fail_requests=1,
+        )
+        runner = DistributionRunner(
+            8000,
+            1,
+            {"batch_seq_len_map": {"4": [128, 128, 256, 256]}},
+            {128: "q128", 256: "q256"},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "distribution batch_size=4"):
+            runner.run()
 
 
 class TestOfflineBenchConfig(unittest.TestCase):
@@ -413,9 +728,7 @@ class TestOfflineBenchConfig(unittest.TestCase):
     def test_validate_num_return_sequences(self):
         from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig
 
-        with self.assertRaisesRegex(
-            ValueError, "num_return_sequences must be >= 1"
-        ):
+        with self.assertRaisesRegex(ValueError, "num_return_sequences must be >= 1"):
             OfflineBenchConfig(num_return_sequences=0).validate()
 
 
@@ -429,9 +742,7 @@ class TestOfflineFailurePolicy(unittest.TestCase):
     def test_rejects_zero_successful_requests(self):
         from rtp_llm.test.perf_test.offline_runner import OfflineMetrics
 
-        metrics = OfflineMetrics(
-            total_submitted=2, success_requests=0, fail_requests=2
-        )
+        metrics = OfflineMetrics(total_submitted=2, success_requests=0, fail_requests=2)
         with self.assertRaisesRegex(RuntimeError, "no requests succeeded"):
             metrics.raise_if_all_requests_failed()
 
@@ -1506,10 +1817,7 @@ class TestOfflineBenchMain(unittest.TestCase):
     def test_all_failed_requests_raise_from_entry_point_and_stop_server(self):
         import rtp_llm.test.perf_test.offline_bench_test as offline_bench
         import rtp_llm.test.perf_test.offline_runner as offline_runner_module
-        from rtp_llm.test.perf_test.offline_runner import (
-            OfflineMetrics,
-            OfflineRunner,
-        )
+        from rtp_llm.test.perf_test.offline_runner import OfflineMetrics, OfflineRunner
 
         server = MagicMock(port=12345)
         failed_metrics = OfflineMetrics(

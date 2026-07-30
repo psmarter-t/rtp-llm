@@ -35,9 +35,29 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# Manual entry point with all model and workload parameters supplied by the
+# caller. Named targets below remain useful examples but cannot be overridden
+# safely because their built-in args precede command-line --test_arg values.
+py_test(
+    name = "configurable_perf_test",
+    srcs = ["test_entry.py"],
+    main = "test_entry.py",
+    timeout = "eternal",
+    data = ["//rtp_llm:sdk"],
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    tags = ["manual"],
+)
+
 py_test(
     name = "test_perf_config_and_runners",
-    srcs = ["test_perf_config_and_runners.py"],
+    srcs = [
+        "test_entry.py",
+        "test_perf_config_and_runners.py",
+    ],
     data = [
         "//rtp_llm/test/tokenizer_test:testdata",
     ],

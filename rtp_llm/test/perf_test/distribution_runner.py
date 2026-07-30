@@ -8,6 +8,7 @@ from rtp_llm.test.perf_test.dataclass import (
     DistributionMetricState,
     create_distribution_metrics_table,
 )
+from rtp_llm.test.perf_test.grid_runner import require_complete_success
 
 
 class DistributionRunner:
@@ -92,6 +93,13 @@ class DistributionRunner:
                     self._generate_config,
                     trace_name,
                 ).run(num_measures=self._num_measures)
+                require_complete_success(
+                    metric,
+                    context=(
+                        f"distribution batch_size={actual_bs}, "
+                        f"seq_lens={min(seq_len_list)}~{max(seq_len_list)}"
+                    ),
+                )
 
                 metrics_list.append(
                     DistributionMetricState(actual_bs, seq_len_list, metric)
