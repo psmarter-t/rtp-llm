@@ -49,6 +49,7 @@ struct GptModelInitParams {
     size_t                                       tokens_per_block        = 0;
     size_t                                       kernel_tokens_per_block = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
+    size_t                                       output_vocab_size = 0;
 };
 
 enum GptModelInputIndex : size_t {

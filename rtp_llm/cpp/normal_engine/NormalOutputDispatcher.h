@@ -1,15 +1,18 @@
 #pragma once
 
 #include <torch/all.h>
+#include <utility>
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/config/OutputVocabMapping.h"
 
 namespace rtp_llm {
 
 class NormalOutputDispatcher {
 public:
-    NormalOutputDispatcher() = default;
+    explicit NormalOutputDispatcher(OutputVocabMappingPtr output_vocab_mapping = nullptr):
+        output_vocab_mapping_(std::move(output_vocab_mapping)) {}
 
     absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
 
@@ -23,6 +26,9 @@ private:
                               const torch::Tensor& new_tokens_all,
                               const torch::Tensor& token_ids_cpu,
                               const torch::Tensor& success_cpu) const;
+
+private:
+    OutputVocabMappingPtr output_vocab_mapping_;
 };
 
 }  // namespace rtp_llm

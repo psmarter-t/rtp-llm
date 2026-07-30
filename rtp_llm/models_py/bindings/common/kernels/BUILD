@@ -46,6 +46,7 @@ cc_library(
         "mask_logits.h",
     ],
     deps = any_cuda_deps + [
+        "//rtp_llm/cpp/config:generation_limits",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:math_utils",
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",

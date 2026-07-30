@@ -11,7 +11,6 @@ struct StreamThinkInfo {
     std::vector<int>                               end_think_token_ids;
     int32_t                                        input_length;
     int32_t                                        current_output_length;
-    bool                                           is_beam_search;
     std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr;
 
     StreamThinkInfo() = default;
@@ -21,14 +20,12 @@ struct StreamThinkInfo {
                     std::vector<int>                               end_think_token_ids,
                     int32_t                                        input_length,
                     int32_t                                        output_length,
-                    bool                                           is_beam_search,
                     std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr):
         in_think_mode(think_mode),
         max_thinking_tokens(max_thinking_tokens),
         end_think_token_ids(end_think_token_ids),
         input_length(input_length),
         current_output_length(output_length),
-        is_beam_search(is_beam_search),
         dfa_ptr(dfa_ptr) {}
 
     StreamThinkInfo copy() {
@@ -38,7 +35,6 @@ struct StreamThinkInfo {
         think_info.end_think_token_ids   = end_think_token_ids;
         think_info.input_length          = input_length;
         think_info.current_output_length = current_output_length;
-        think_info.is_beam_search        = is_beam_search;
         if (dfa_ptr) {
             think_info.dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(*dfa_ptr);
         }

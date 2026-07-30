@@ -63,6 +63,9 @@ class RoleAddr(BaseModel):
 _DIVERGE_START_COMBO_WARN_THRESHOLD = 100
 # 对应 C++ kMaxDivergeDepth，超过此值的 num_return_sequences 可能导致采样质量退化。
 _MAX_DIVERGE_DEPTH = 8
+# Must match rtp_llm::kMaxNoRepeatNgramSize. The CUDA/ROCm kernel allocates
+# shared memory for this bounded ngram length.
+_MAX_NO_REPEAT_NGRAM_SIZE = 32
 # 警告限流状态：与 C++ INTERVAL_LOG(300) 对齐，每 300 秒最多输出一次。
 # NOTE: 模块级全局无锁读改写，多线程下可能偶发多输出/少输出一次告警，
 # 仅影响告警频率不影响正确性，可接受。
@@ -76,6 +79,10 @@ def _reset_sanitize_warn_state():
     global _last_sanitize_warn_time, _last_downgrade_warn_time
     _last_sanitize_warn_time = 0.0
     _last_downgrade_warn_time = 0.0
+
+
+def _is_valid_no_repeat_ngram_size(value: int) -> bool:
+    return is_positive_integer(value) and value <= _MAX_NO_REPEAT_NGRAM_SIZE
 
 
 class GenerateConfig(BaseModel):
@@ -105,7 +112,7 @@ class GenerateConfig(BaseModel):
     presence_penalty: Union[List[float], float] = 0.0
     frequency_penalty: Union[List[float], float] = 0.0
     min_new_tokens: Union[List[int], int] = 0
-    no_repeat_ngram_size: Optional[Union[List[int], int]] = None
+    no_repeat_ngram_size: Optional[int] = None
     # 生成式推荐：组合 token 粒度去重与曝光过滤。
     # combo_token_size 表示一个商品由多少个连续 token 组成（例如三层语义 ID = 3），0 表示关闭该功能。
     # banned_combo_token_ids 是禁止生成的商品 token 组合列表，每项长度必须等于 combo_token_size。
@@ -505,9 +512,16 @@ class GenerateConfig(BaseModel):
                 think_end_tag, add_special_tokens=False
             )
             self.end_think_token_ids = tokenized_result
-        self.in_think_mode = (
-            bool(generate_env_config.think_mode) and len(self.end_think_token_ids) >= 0
-        )
+        self.in_think_mode = bool(generate_env_config.think_mode)
+        if (
+            self.in_think_mode
+            and self.max_thinking_tokens > 0
+            and not self.end_think_token_ids
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "think mode with max_thinking_tokens > 0 requires non-empty end_think_token_ids",
+            )
 
     def add_stop_ids_from_str(self, tokenizer):
         ids_list = []
@@ -575,8 +589,9 @@ class GenerateConfig(BaseModel):
                 f"temperature {self.temperature} is wrong data type",
             )
             check_with_info(
-                check_optional(is_union_positive_integer, self.no_repeat_ngram_size),
-                f"no_repeat_ngram_size {self.no_repeat_ngram_size} is wrong data type",
+                self.no_repeat_ngram_size is None
+                or _is_valid_no_repeat_ngram_size(self.no_repeat_ngram_size),
+                f"no_repeat_ngram_size {self.no_repeat_ngram_size} must be an integer in [0, {_MAX_NO_REPEAT_NGRAM_SIZE}]",
             )
             check_with_info(
                 check_optional(is_union_positive_integer, self.random_seed),
@@ -635,6 +650,12 @@ class GenerateConfig(BaseModel):
                     is_positive_integer(self.max_thinking_tokens),
                     f"max_thinking_tokens {self.max_thinking_tokens} is wrong data type",
                 )
+                if self.max_thinking_tokens > 0:
+                    check_with_info(
+                        len(self.end_think_token_ids) > 0,
+                        "think mode with max_thinking_tokens > 0 requires non-empty end_think_token_ids",
+                    )
+            if self.in_think_mode or self.combo_token_size > 0:
                 check_with_info(
                     is_list_positive_integer(self.end_think_token_ids),
                     f"end_think_token_ids {self.end_think_token_ids} is wrong data type",

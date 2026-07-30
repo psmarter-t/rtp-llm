@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/OutputVocabMapping.h"
 
 namespace rtp_llm {
 
@@ -15,6 +16,7 @@ class GenerateStream;
 struct ResourceContext {
     std::shared_ptr<KVCacheManager> cache_manager;
     std::shared_ptr<SystemPrompt>   system_prompt;
+    OutputVocabMappingPtr           output_vocab_mapping;
 
     RoleType role_type{RoleType::PDFUSION};
     bool     decode_entrance{false};  // PD反转模式：Decode侧作为请求入口

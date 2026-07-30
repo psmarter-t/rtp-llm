@@ -12,8 +12,10 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/config/GenerationLimits.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/models/logits_processor/PrefixToCandidateTokens.h"
 #include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 
 using namespace std;
@@ -62,7 +64,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         loss_ = torch::zeros({(int64_t)inputLength() - 1}, torch::kFloat32);
     }
     if (generate_input_->generate_config->return_softmax_probs) {
-        softmax_probs_ = torch::zeros({(int64_t)init_batch_size, (int64_t)max_seq_len_}, torch::kFloat32);
+        softmax_probs_ = torch::zeros({(int64_t)maxBatchSize(), (int64_t)max_seq_len_}, torch::kFloat32);
     }
     if (generate_input_->generate_config->return_all_hidden_states) {
         setReturnLastHiddenStates(true);
@@ -86,8 +88,88 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
+    if (generateConfig()->no_repeat_ngram_size.has_value()
+        && (generateConfig()->no_repeat_ngram_size.value() < 0
+            || generateConfig()->no_repeat_ngram_size.value() > kMaxNoRepeatNgramSize)) {
+        reportError(ErrorCode::INVALID_PARAMS,
+                    "no_repeat_ngram_size must be in [0, " + std::to_string(kMaxNoRepeatNgramSize) + "]");
+        return;
+    }
+
+    if (generateConfig()->in_think_mode && generateConfig()->max_thinking_tokens > 0
+        && generateConfig()->end_think_token_ids.empty()) {
+        reportError(ErrorCode::INVALID_PARAMS,
+                    "think mode with max_thinking_tokens > 0 requires non-empty end_think_token_ids");
+        return;
+    }
+
+    if (generateConfig()->in_think_mode && generateConfig()->max_thinking_tokens > 0 && hasNumBeams()
+        && generateConfig()->max_thinking_tokens <= generateConfig()->max_new_tokens) {
+        const int first_forced_output_len = generateConfig()->max_thinking_tokens - 1;
+        const int last_forced_output_len =
+            std::min(generateConfig()->max_new_tokens - 1,
+                     first_forced_output_len + static_cast<int>(generateConfig()->end_think_token_ids.size()) - 1);
+        for (int output_len = first_forced_output_len; output_len <= last_forced_output_len; ++output_len) {
+            const int beams_in  = numBeams(output_len);
+            const int beams_out = numBeams(output_len + 1);
+            if (beams_out > beams_in) {
+                reportError(ErrorCode::INVALID_PARAMS,
+                            "think-mode hard terminator cannot expand beam width from " + std::to_string(beams_in)
+                                + " to " + std::to_string(beams_out) + " at output length "
+                                + std::to_string(output_len));
+                return;
+            }
+        }
+    }
+
+    int64_t    sampler_eos_token_id = special_tokens_.eos_token_id;
+    const bool requires_multi_seq_processor =
+        generateConfig()->num_return_sequences > 1 || generateConfig()->hasNumBeams();
+    if (requires_multi_seq_processor
+        && (sampler_eos_token_id < 0 || sampler_eos_token_id >= static_cast<int64_t>(vocab_size_))) {
+        reportError(ErrorCode::INVALID_PARAMS,
+                    "beam search and multiple return sequences require an EOS token id in model vocabulary [0, "
+                        + std::to_string(vocab_size_) + "), got " + std::to_string(sampler_eos_token_id));
+        return;
+    }
+    if (resource_context.output_vocab_mapping) {
+        const auto& mapping = resource_context.output_vocab_mapping;
+        if (PrefixToCandidateTokens::instance()->initSuccess()) {
+            reportError(ErrorCode::INVALID_PARAMS, "output vocabulary pruning does not support tree decoding");
+            return;
+        }
+        const bool uses_end_think_tokens =
+            (generateConfig()->in_think_mode && generateConfig()->max_thinking_tokens > 0)
+            || generateConfig()->combo_token_size > 0;
+        if (uses_end_think_tokens) {
+            for (const auto token_id : generateConfig()->end_think_token_ids) {
+                if (!mapping->contains(token_id)) {
+                    reportError(ErrorCode::INVALID_PARAMS,
+                                "think/recommendation terminator token [" + std::to_string(token_id)
+                                    + "] is not present in the configured output vocabulary");
+                    return;
+                }
+            }
+        }
+        if (generateConfig()->hasNumBeams()
+            && mapping->size() <= static_cast<size_t>(2 * generateConfig()->maxNumBeams())) {
+            reportError(ErrorCode::INVALID_PARAMS,
+                        "configured output vocabulary size must be greater than twice the maximum beam width");
+            return;
+        }
+        if (sampler_eos_token_id >= 0) {
+            auto local_eos_token_id = mapping->toLocal(sampler_eos_token_id);
+            if (!local_eos_token_id.has_value()) {
+                reportError(ErrorCode::INVALID_PARAMS,
+                            "EOS token [" + std::to_string(sampler_eos_token_id)
+                                + "] is not present in the configured output vocabulary");
+                return;
+            }
+            sampler_eos_token_id = local_eos_token_id.value();
+        }
+    }
     logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
+        generate_input_, init_batch_size, maxBatchSize(), sampler_eos_token_id);
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -150,7 +232,7 @@ int GenerateStream::nextNeedBlockNums(int reserve_step) const {
 
 int GenerateStream::estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const {
     const int reserve_step   = complete_token_ids_->getReserveStep();
-    int common_seq_len = std::min(complete_token_ids_->commonSeqLength(), seqLength());
+    int       common_seq_len = std::min(complete_token_ids_->commonSeqLength(), seqLength());
     if (target_batch_size > 1) {
         common_seq_len = common_seq_len / seqSizePerBlock() * seqSizePerBlock();
     }
@@ -235,6 +317,10 @@ int GenerateStream::currentNumBeams() const {
 
 int GenerateStream::nextNumBeams() const {
     return numBeams(outputTokenLen() + 1);
+}
+
+bool GenerateStream::usesBeamSearchTokenLayoutForCurrentStep() const {
+    return currentNumBeams() > 1 || nextNumBeams() > 1;
 }
 
 int GenerateStream::maxNumBeams() const {
@@ -746,7 +832,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                                      generate_input_->inputLength(),
                                      maxTokenNum(),
                                      vocab_size_,
-                                     hasNumBeams(),
+                                     false,  // speculative updates always carry incremental tokens
                                      streamId(),
                                      error_token_id)) {
         reportEventWithoutLock(StreamEvents::Error,
@@ -821,6 +907,9 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 
     const auto& new_tokens     = update_info.new_tokens;
     auto        num_new_tokens = update_info.num_new_tokens;
+    // Evaluate before CompleteTokenIds advances seqLength(): current/next beam
+    // widths describe the sampler output layout for this update.
+    const bool tokens_are_complete_sequences = usesBeamSearchTokenLayoutForCurrentStep();
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
@@ -829,7 +918,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                                      generate_input_->inputLength(),
                                      maxTokenNum(),
                                      vocab_size_,
-                                     hasNumBeams(),
+                                     tokens_are_complete_sequences,
                                      streamId(),
                                      error_token_id)) {
         reportEventWithoutLock(StreamEvents::Error,
@@ -919,17 +1008,28 @@ void GenerateStream::setLoss(const torch::Tensor& loss) {
     loss_index_ += loss_size;
 }
 
-void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos) {
+void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs,
+                                     int                  start_pos,
+                                     const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto probs_cpu = softmax_probs.is_cuda() ? softmax_probs.cpu() : softmax_probs;
+    auto probs_cpu = (softmax_probs.is_cuda() ? softmax_probs.cpu() : softmax_probs).contiguous();
     RTP_LLM_CHECK(probs_cpu.dim() == 2);
     RTP_LLM_CHECK(probs_cpu.size(0) == currentBatchSize());
-    auto num_probs = probs_cpu.size(1);
-    for (int i = 0; i < currentBatchSize(); ++i) {
-        memcpy(softmax_probs_.data_ptr<float>() + i * softmax_probs_.size(1) + start_pos,
-               probs_cpu[i].data_ptr<float>(),
-               num_probs * sizeof(float));
+    RTP_LLM_CHECK(start_pos >= 0);
+    RTP_LLM_CHECK(start_pos + probs_cpu.size(1) <= softmax_probs_.size(1));
+
+    if (src_batch_indices.defined()) {
+        auto src_indices_cpu =
+            (src_batch_indices.is_cuda() ? src_batch_indices.cpu() : src_batch_indices).to(torch::kLong).contiguous();
+        RTP_LLM_CHECK(src_indices_cpu.numel() == currentBatchSize());
+        if (start_pos > 0) {
+            // Clone before writing because multiple child beams may share the same parent row.
+            auto reordered_history = softmax_probs_.index_select(0, src_indices_cpu).narrow(1, 0, start_pos).clone();
+            softmax_probs_.narrow(0, 0, currentBatchSize()).narrow(1, 0, start_pos).copy_(reordered_history);
+        }
     }
+
+    softmax_probs_.narrow(0, 0, currentBatchSize()).narrow(1, start_pos, probs_cpu.size(1)).copy_(probs_cpu);
 }
 
 torch::Tensor GenerateStream::getLoss() {

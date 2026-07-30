@@ -163,9 +163,12 @@ public:
     int nextBatchSize() const;
     int maxBatchSize() const;
 
-    int  numBeams(int output_len) const;
-    int  currentNumBeams() const;
-    int  nextNumBeams() const;
+    int numBeams(int output_len) const;
+    int currentNumBeams() const;
+    int nextNumBeams() const;
+    // Dynamic beam requests use incremental tokens on a 1 -> 1 step and
+    // complete token histories on every step that enters or leaves beam search.
+    bool usesBeamSearchTokenLayoutForCurrentStep() const;
     int  maxNumBeams() const;
     bool hasNumBeams() const;
 
@@ -265,7 +268,9 @@ public:
     const ResourceContext&      resourceContext() const;
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
     void                        setLoss(const torch::Tensor& loss);
-    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos);
+    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs,
+                                                int                  start_pos,
+                                                const torch::Tensor& src_batch_indices = torch::Tensor());
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     BatchKVCacheResourcePtr     kvCachePtr();

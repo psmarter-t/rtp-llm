@@ -11,17 +11,50 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/MTPModelConfigHelper.h"
+#include "rtp_llm/cpp/config/OutputVocabMapping.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
+#include <pybind11/stl.h>
 
 using namespace std;
 namespace th = torch;
 
 namespace rtp_llm {
+
+namespace {
+
+OutputVocabMappingPtr parseOutputVocabMapping(const py::object& model, const ModelConfig& model_config) {
+    if (!py::hasattr(model, "output_vocab_mapping")) {
+        return nullptr;
+    }
+    auto py_mapping = model.attr("output_vocab_mapping");
+    if (py_mapping.is_none()) {
+        return nullptr;
+    }
+
+    auto mapping = std::make_shared<OutputVocabMapping>(py_mapping.attr("full_vocab_size").cast<int64_t>(),
+                                                        py_mapping.attr("local_to_full").cast<std::vector<int32_t>>(),
+                                                        py_mapping.attr("model_identity").cast<std::string>(),
+                                                        py_mapping.attr("config_digest").cast<std::string>());
+    if (mapping->fullVocabSize() != model_config.vocab_size) {
+        throw std::invalid_argument("output vocabulary mapping does not match ModelConfig.vocab_size");
+    }
+    const auto eos_token_id = model_config.special_tokens.eos_token_id;
+    if (eos_token_id >= 0 && !mapping->contains(eos_token_id)) {
+        throw std::invalid_argument("output vocabulary does not contain the model EOS token");
+    }
+    RTP_LLM_LOG_INFO("output vocabulary pruning enabled: full_vocab_size=%ld, output_vocab_size=%zu, digest=%s",
+                     mapping->fullVocabSize(),
+                     mapping->size(),
+                     mapping->configDigest().c_str());
+    return mapping;
+}
+
+}  // namespace
 
 std::unique_ptr<ProposeModelEngineInitParams>
 prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const EngineInitParams& base_params) {
@@ -202,8 +235,9 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 py_model,
                                 weight_manager,
                                 py_eplb);
-        params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
-        params.server_config    = engine_config.attr("server_config");
+        params.nccl_comm_config     = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
+        params.server_config        = engine_config.attr("server_config");
+        params.output_vocab_mapping = parseOutputVocabMapping(model, model_config);
         model_id_++;
         if (parallelism_config.tp_rank == 0) {
             // kmon metric init

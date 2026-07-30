@@ -37,11 +37,44 @@ from rtp_llm.utils.weight_type import WEIGHT_TYPE
 if TYPE_CHECKING:
     from rtp_llm.config.kv_cache_config import KVCacheConfig
     from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.config.output_vocab_config import OutputVocabMapping
     from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 
 
 def create_scalar_ones(ts: List[torch.Tensor]):
     return torch.ones([1], dtype=torch.float32).to(ts[0].device)
+
+
+def select_output_vocab_rows(
+    tensors: List[torch.Tensor],
+    origin_func,
+    local_to_full: Tuple[int, ...],
+    full_vocab_size: int,
+    hidden_size: int,
+) -> torch.Tensor:
+    lm_head = origin_func(tensors)
+    if lm_head.dim() != 2:
+        raise ValueError(
+            "output vocabulary pruning requires a two-dimensional LM Head, "
+            f"got shape {tuple(lm_head.shape)}"
+        )
+    if lm_head.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise ValueError(
+            "output vocabulary pruning only supports FP16, BF16, or FP32 "
+            f"LM Head weights, got {lm_head.dtype}"
+        )
+    if lm_head.size(0) < full_vocab_size:
+        raise ValueError(
+            f"LM Head has {lm_head.size(0)} rows, which does not cover "
+            f"model vocab_size {full_vocab_size}"
+        )
+    if lm_head.size(1) != hidden_size:
+        raise ValueError(
+            "output vocabulary pruning requires a row-major [V,H] LM Head with "
+            f"hidden size {hidden_size}, got shape {tuple(lm_head.shape)}"
+        )
+    index = torch.tensor(local_to_full, dtype=torch.long, device=lm_head.device)
+    return lm_head.index_select(0, index).contiguous()
 
 
 class ModelWeightInfo:
@@ -165,6 +198,9 @@ class ModelDeployWeightInfo:
         """Initialize ModelDeployWeightInfo with independent configuration objects."""
         self.model_config = model_config
         self.merge_lora = merge_lora
+        self.output_vocab_mapping: Optional["OutputVocabMapping"] = kwargs.pop(
+            "output_vocab_mapping", None
+        )
 
         self._use_swizzleA = hw_kernel_config.use_swizzleA
         self._use_qk_norm = model_config.qk_norm
@@ -309,6 +345,15 @@ class ModelDeployWeightInfo:
                 layer_weights.append(weight_info.layer_weights)
             weight_info.layer_weights = layer_weights
 
+        if (
+            self.output_vocab_mapping is not None
+            and self.weight_style != WeightStyle.NONE
+        ):
+            raise ValueError(
+                "output vocabulary pruning does not support non-default "
+                f"weight style {self.weight_style}"
+            )
+
         if self.weight_style != WeightStyle.NONE:
             logging.info("fix weight style")
             weight_info = self._fix_weight_style_layer_weight(weight_info)
@@ -331,7 +376,56 @@ class ModelDeployWeightInfo:
         if self.enable_fp32_lm_head:
             weight_info = self._fix_fp32_lm_head(weight_info)
 
+        if self.output_vocab_mapping is not None:
+            weight_info = self._fix_output_vocab_lm_head(weight_info)
+
         return weight_info
+
+    def _fix_output_vocab_lm_head(
+        self, origin_weight_info: ModelWeightInfo
+    ) -> ModelWeightInfo:
+        if self.model_config.has_lm_head_bias:
+            raise ValueError("output vocabulary pruning does not support LM Head bias")
+
+        lm_head = None
+        for weight in origin_weight_info.weights:
+            if weight.name == W.lm_head_b:
+                raise ValueError(
+                    "output vocabulary pruning does not support LM Head bias"
+                )
+            if weight.name == W.lm_head:
+                lm_head = weight
+
+        if lm_head is None:
+            raise ValueError("output vocabulary pruning requires an LM Head weight")
+        if not isinstance(lm_head, AtomicWeight):
+            raise ValueError(
+                "output vocabulary pruning only supports a plain two-dimensional "
+                f"LM Head, got {type(lm_head).__name__}"
+            )
+        if (
+            lm_head.lora_a_process_func is not None
+            or lm_head.lora_b_process_func is not None
+        ):
+            raise ValueError("output vocabulary pruning does not support LM Head LoRA")
+
+        origin_func = lm_head.process_fun
+        mapping = self.output_vocab_mapping
+        lm_head.process_fun = functools.partial(
+            select_output_vocab_rows,
+            origin_func=origin_func,
+            local_to_full=mapping.local_to_full,
+            full_vocab_size=mapping.full_vocab_size,
+            hidden_size=self._hidden_size,
+        )
+        logging.info(
+            "enabled output vocabulary pruning for LM Head: full_vocab_size=%d, "
+            "output_vocab_size=%d, digest=%s",
+            mapping.full_vocab_size,
+            mapping.size,
+            mapping.config_digest,
+        )
+        return origin_weight_info
 
     def _fix_weight_style_layer_weight(self, origin_weight_info: ModelWeightInfo):
         global_weights = []
@@ -509,6 +603,11 @@ class ModelDeployWeightInfo:
             self._filter_ckpt_files_by_weight_info(database, weight_info)
             return weight_info
         elif database.is_ft_style:
+            if self.output_vocab_mapping is not None:
+                raise ValueError(
+                    "output vocabulary pruning does not support FT-style "
+                    "pre-sharded checkpoints"
+                )
             return None
         else:
             raise Exception("Unknown database class")

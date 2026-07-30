@@ -15,6 +15,11 @@ from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
+from rtp_llm.config.output_vocab_config import (
+    OutputVocabMapping,
+    OutputVocabRankState,
+    validate_output_vocab_rank_states,
+)
 from rtp_llm.config.py_config_modules import (
     EmbeddingConfig,
     GenerateEnvConfig,
@@ -25,7 +30,7 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType
+from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, TaskType
 from rtp_llm.utils.util import check_with_info
 
 
@@ -55,6 +60,71 @@ class ModelFactory:
         return model_cls
 
     @staticmethod
+    def _resolve_output_vocab_mapping(
+        model_config: ModelConfig, engine_config: EngineConfig
+    ) -> Optional[OutputVocabMapping]:
+        mapping = None
+        local_error: Optional[Exception] = None
+        try:
+            mapping = engine_config.output_vocab_config.resolve(
+                full_vocab_size=model_config.vocab_size,
+                input_vocab_size=(
+                    model_config.input_vocab_size
+                    if model_config.input_vocab_size > 0
+                    else model_config.vocab_size
+                ),
+            )
+        except Exception as error:
+            local_error = error
+
+        expected_world_size = int(engine_config.parallelism_config.world_size)
+        if expected_world_size <= 1:
+            if local_error is not None:
+                raise local_error
+            return mapping
+
+        if not torch.distributed.is_initialized():
+            raise RuntimeError(
+                "distributed environment must be initialized before validating "
+                "output vocabulary configuration"
+            )
+
+        actual_world_size = torch.distributed.get_world_size()
+        if actual_world_size != expected_world_size:
+            raise RuntimeError(
+                "output vocabulary rank validation expected world_size "
+                f"{expected_world_size}, got {actual_world_size}"
+            )
+
+        if local_error is not None:
+            logging.error(
+                "output vocabulary configuration failed on rank %d: %s: %s",
+                torch.distributed.get_rank(),
+                type(local_error).__name__,
+                local_error,
+            )
+
+        local_state = OutputVocabRankState(
+            rank=torch.distributed.get_rank(),
+            parse_ok=local_error is None,
+            enabled=mapping is not None,
+            full_vocab_size=model_config.vocab_size,
+            output_vocab_size=(
+                mapping.size if mapping is not None else model_config.vocab_size
+            ),
+            config_digest=engine_config.output_vocab_config.config_digest,
+            error=(
+                f"{type(local_error).__name__}: {local_error}"
+                if local_error is not None
+                else ""
+            ),
+        )
+        rank_states = [None] * actual_world_size
+        torch.distributed.all_gather_object(rank_states, local_state)
+        validate_output_vocab_rank_states(rank_states, actual_world_size)
+        return mapping
+
+    @staticmethod
     def _create_model(
         model_config: ModelConfig,
         engine_config: EngineConfig,
@@ -79,6 +149,26 @@ class ModelFactory:
         model_config.model_name = model_name
         engine_config.runtime_config.model_name = model_name
 
+        output_vocab_mapping = ModelFactory._resolve_output_vocab_mapping(
+            model_config, engine_config
+        )
+        if output_vocab_mapping is not None:
+            if model_config.task_type != TaskType.LANGUAGE_MODEL:
+                raise ValueError(
+                    "output vocabulary pruning is only supported for language models"
+                )
+            if engine_config.sp_config.type != SpeculativeType.NONE:
+                raise ValueError(
+                    "output vocabulary pruning cannot be combined with "
+                    "speculative decoding"
+                )
+            eos_token_id = model_config.special_tokens.eos_token_id
+            if eos_token_id >= 0 and not output_vocab_mapping.contains(eos_token_id):
+                raise ValueError(
+                    f"model EOS token {eos_token_id} is not present in the "
+                    "configured output vocabulary"
+                )
+
         model = model_cls.from_config(
             model_config=model_config,
             parallelism_config=engine_config.parallelism_config,
@@ -92,6 +182,7 @@ class ModelFactory:
             merge_lora=merge_lora,
             device_resource_config=engine_config.device_resource_config,
             force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
+            output_vocab_mapping=output_vocab_mapping,
         )
         return model
 

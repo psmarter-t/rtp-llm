@@ -102,7 +102,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          params.model_config_.hidden_size,
          runtime_tokens_per_block,
          runtime_kernel_tokens_per_block,
-         cache_manager});
+         cache_manager,
+         params.output_vocab_mapping ? params.output_vocab_mapping->size() : 0});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -124,8 +125,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                   cache_manager->cacheConfig()) :
                                    CacheConfig();
 
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(
-        params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
+    batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.model_config_,
+                                                                 params.pd_sep_config,
+                                                                 params.profiling_debug_logging_config,
+                                                                 cache_config,
+                                                                 warm_up_,
+                                                                 params.output_vocab_mapping));
     LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
     cudaProfilerBegin();
 }

@@ -68,6 +68,8 @@ cc_library(
     deps = [
         ":sample_infos",
         ":dfa_utils",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:output_vocab_mapping",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/pybind:py_utils",
@@ -150,6 +152,7 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
+        "//rtp_llm/cpp/config:config_modules",
     ],
     visibility = ["//visibility:public"],
 )

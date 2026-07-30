@@ -23,6 +23,7 @@ std::shared_ptr<GenerateStream> EngineBase::makeStream(const std::shared_ptr<Gen
 }
 
 void EngineBase::initRuntime(const EngineInitParams& params) {
+    resource_context_.output_vocab_mapping = params.output_vocab_mapping;
     const auto rank =
         params.parallelism_config.dp_rank * params.parallelism_config.tp_size + params.parallelism_config.tp_rank;
     Logger::getEngineLogger().setRank(rank);

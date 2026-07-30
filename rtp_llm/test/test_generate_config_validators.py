@@ -21,13 +21,22 @@
 
 import logging
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from rtp_llm.config.generate_config import (
-    GenerateConfig,
     _DIVERGE_START_COMBO_WARN_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
+)
+from rtp_llm.config.generate_config import (
     _MAX_DIVERGE_DEPTH,  # pyright: ignore[reportPrivateUsage]
+)
+from rtp_llm.config.generate_config import (
+    _MAX_NO_REPEAT_NGRAM_SIZE,  # pyright: ignore[reportPrivateUsage]
+)
+from rtp_llm.config.generate_config import (
     _reset_sanitize_warn_state,  # pyright: ignore[reportPrivateUsage]
 )
+from rtp_llm.config.generate_config import GenerateConfig
 
 
 class TestClampDivergeStartCombo(unittest.TestCase):
@@ -104,6 +113,67 @@ class TestClampDivergeStartCombo(unittest.TestCase):
             cfg = GenerateConfig(cross_seq_diverge_start_combo=100)
         self.assertEqual(cfg.cross_seq_diverge_start_combo, 100)
 
+    def test_recommendation_validates_end_think_token_ids(self):
+        cfg = GenerateConfig(combo_token_size=3)
+        cfg.end_think_token_ids = ["invalid"]  # type: ignore[list-item]
+
+        with self.assertRaisesRegex(Exception, "end_think_token_ids"):
+            cfg.validate()
+
+    def test_formal_think_requires_non_empty_terminator(self):
+        cfg = GenerateConfig(
+            in_think_mode=True,
+            max_thinking_tokens=4,
+            end_think_token_ids=[],
+        )
+
+        with self.assertRaisesRegex(Exception, "requires non-empty"):
+            cfg.validate()
+
+    def test_zero_length_or_disabled_think_allows_empty_terminator(self):
+        GenerateConfig(
+            in_think_mode=True,
+            max_thinking_tokens=0,
+            end_think_token_ids=[],
+        ).validate()
+        GenerateConfig(in_think_mode=False, end_think_token_ids=[]).validate()
+
+    def test_recommendation_only_allows_empty_terminator(self):
+        GenerateConfig(
+            in_think_mode=False,
+            combo_token_size=3,
+            end_think_token_ids=[],
+        ).validate()
+
+    def test_add_thinking_params_rejects_empty_tokenizer_result(self):
+        tokenizer = MagicMock()
+        tokenizer.encode.return_value = []
+        env = SimpleNamespace(
+            think_mode=1,
+            think_end_token_id=-1,
+            think_end_tag="</think>",
+        )
+        cfg = GenerateConfig(max_thinking_tokens=4)
+
+        with self.assertRaisesRegex(Exception, "requires non-empty"):
+            cfg.add_thinking_params(tokenizer, env)
+
+    def test_no_repeat_ngram_size_kernel_boundary(self):
+        GenerateConfig(no_repeat_ngram_size=0).validate()
+        GenerateConfig(no_repeat_ngram_size=_MAX_NO_REPEAT_NGRAM_SIZE).validate()
+
+        with self.assertRaisesRegex(Exception, "no_repeat_ngram_size"):
+            GenerateConfig(
+                no_repeat_ngram_size=_MAX_NO_REPEAT_NGRAM_SIZE + 1
+            ).validate()
+        with self.assertRaisesRegex(Exception, "no_repeat_ngram_size"):
+            GenerateConfig(no_repeat_ngram_size=-1).validate()
+
+        cfg = GenerateConfig()
+        cfg.update({"no_repeat_ngram_size": [0, _MAX_NO_REPEAT_NGRAM_SIZE]})
+        with self.assertRaisesRegex(Exception, "no_repeat_ngram_size"):
+            cfg.validate()
+
 
 class TestCrossSeqBanCompatibility(unittest.TestCase):
     """测试 enable_cross_sequence_ban 与 beam search / combo_token_size 的互斥校验。"""
@@ -119,7 +189,9 @@ class TestCrossSeqBanCompatibility(unittest.TestCase):
                 num_beams=4,
                 combo_token_size=3,
             )
-        self.assertTrue(any("incompatible with beam search" in msg for msg in cm.output))
+        self.assertTrue(
+            any("incompatible with beam search" in msg for msg in cm.output)
+        )
         self.assertFalse(cfg.enable_cross_sequence_ban)
 
     def test_variable_num_beams_incompatible_disables(self):
@@ -131,7 +203,9 @@ class TestCrossSeqBanCompatibility(unittest.TestCase):
                 variable_num_beams=[1, 4],
                 combo_token_size=3,
             )
-        self.assertTrue(any("incompatible with beam search" in msg for msg in cm.output))
+        self.assertTrue(
+            any("incompatible with beam search" in msg for msg in cm.output)
+        )
         self.assertFalse(cfg.enable_cross_sequence_ban)
 
     def test_combo_token_size_lt2_disables(self):
@@ -330,9 +404,11 @@ class TestCrossLanguageConstantSync(unittest.TestCase):
         """
         EXPECTED_CPP_VALUE = 100  # mirrors C++ kDivergeStartComboWarnThreshold
         self.assertEqual(
-            _DIVERGE_START_COMBO_WARN_THRESHOLD, EXPECTED_CPP_VALUE,
+            _DIVERGE_START_COMBO_WARN_THRESHOLD,
+            EXPECTED_CPP_VALUE,
             f"Python({_DIVERGE_START_COMBO_WARN_THRESHOLD}) != C++ expected({EXPECTED_CPP_VALUE}), "
-            f"constants drifted! Check RecommendationLogitsProcessor.cc static_assert.")
+            f"constants drifted! Check RecommendationLogitsProcessor.cc static_assert.",
+        )
 
     def test_max_diverge_depth_sync(self):
         """确保 Python _MAX_DIVERGE_DEPTH == C++ kMaxDivergeDepth(=8)。
@@ -342,9 +418,11 @@ class TestCrossLanguageConstantSync(unittest.TestCase):
         """
         EXPECTED_CPP_VALUE = 8  # mirrors C++ kMaxDivergeDepth
         self.assertEqual(
-            _MAX_DIVERGE_DEPTH, EXPECTED_CPP_VALUE,
+            _MAX_DIVERGE_DEPTH,
+            EXPECTED_CPP_VALUE,
             f"Python({_MAX_DIVERGE_DEPTH}) != C++ expected({EXPECTED_CPP_VALUE}), "
-            f"constants drifted! Check RecommendationLogitsProcessor.cc static_assert.")
+            f"constants drifted! Check RecommendationLogitsProcessor.cc static_assert.",
+        )
 
     def test_enable_conditions_sync(self):
         """SYNC 真值表比对：验证 Python 侧启用条件的行为语义。
@@ -376,7 +454,9 @@ class TestCrossLanguageConstantSync(unittest.TestCase):
             (2, 1, 1, False),
         ]
         for num_beams, combo_size, num_ret, expected in truth_table:
-            with self.subTest(num_beams=num_beams, combo_size=combo_size, num_ret=num_ret):
+            with self.subTest(
+                num_beams=num_beams, combo_size=combo_size, num_ret=num_ret
+            ):
                 cfg = GenerateConfig(
                     enable_cross_sequence_ban=True,
                     num_beams=num_beams,
@@ -384,9 +464,11 @@ class TestCrossLanguageConstantSync(unittest.TestCase):
                     num_return_sequences=num_ret,
                 )
                 self.assertEqual(
-                    cfg.enable_cross_sequence_ban, expected,
+                    cfg.enable_cross_sequence_ban,
+                    expected,
                     f"Input({num_beams}, {combo_size}, {num_ret}): "
-                    f"expected enabled={expected}, got {cfg.enable_cross_sequence_ban}")
+                    f"expected enabled={expected}, got {cfg.enable_cross_sequence_ban}",
+                )
 
 
 if __name__ == "__main__":

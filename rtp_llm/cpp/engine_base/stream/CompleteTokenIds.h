@@ -26,13 +26,15 @@ public:
     bool matchEosToken(int batch_id, int token_id);
     bool matchStopWordsList(int batch_id, const std::vector<int>& stop_words);
 
+    // Beam-layout rows contain the complete history; other rows contain only
+    // incremental tokens. Dynamic beam requests can switch layouts per step.
     bool update(const torch::Tensor& new_tokens,
                 int64_t              begin_time_us,
                 int                  num_new_tokens,
                 int                  input_length,
                 int                  max_token_num,
                 int                  vocab_size,
-                bool                 is_beam_search,
+                bool                 tokens_are_complete_sequences,
                 int64_t              stream_id,
                 int&                 error_token_id);
     void copyTokensTo(int batch_id, void* dst, int offset, size_t token_num);

@@ -115,6 +115,53 @@ RTP-LLM deployments are released as versioned, immutable container images, with 
 | `--max-batch-size` | Override system maximum batch size. | 0 |
 | `--enable-flashinfer-sample-kernel` | Enables FlashInfer sampling kernel. | True |
 
+## Output Vocabulary Pruning
+
+Output vocabulary pruning keeps the input embedding at the model vocabulary size
+`V`, but selects a configured subset of LM Head rows before TP sharding. The
+sampler operates on the resulting logical vocabulary size `K`; generated token
+IDs and optional full-logits/probability responses are restored to the original
+model vocabulary space before they are returned.
+
+The feature is disabled when `--output_vocab_config_path` is empty. Both CLI
+arguments also have equivalent uppercase environment variables.
+
+| Argument | Environment variable | Description | Default |
+|----------|----------------------|-------------|---------|
+| `--output_vocab_config_path` | `OUTPUT_VOCAB_CONFIG_PATH` | Path to a versioned JSON output-vocabulary configuration. | `""` |
+| `--output_vocab_model_identity` | `OUTPUT_VOCAB_MODEL_IDENTITY` | Deployment model/tokenizer revision or manifest identity. It must exactly match the JSON `model_identity`. | `""` |
+
+The version 1 schema accepts half-open ranges and discrete token IDs. The two
+lists may be combined; IDs are sorted and deduplicated when the configuration is
+loaded.
+
+```json
+{
+  "version": 1,
+  "model_identity": "model-name@revision",
+  "model_vocab_size": 217303,
+  "output_vocab": {
+    "ranges": [
+      {"start_id": 151643, "end_id": 217303}
+    ],
+    "token_ids": [0, 1]
+  }
+}
+```
+
+The configured set must be non-empty, remain inside both the model vocabulary
+and input embedding, and contain the model EOS token. Beam Search requests must
+also satisfy `K > 2 * max_beam_width`; Greedy and Sampling requests do not have
+this constraint. Think-mode requests require every configured end-think token
+to be retained. Tree decoding is currently rejected when pruning is enabled.
+A configuration containing the complete identity mapping is accepted but
+leaves pruning disabled.
+
+The initial implementation supports plain FP16, BF16, and FP32 tied or untied
+LM Heads. It rejects quantized LM Heads, LM Head bias or LoRA, FT-style
+pre-sharded weights, speculative decoding, and non-language-model tasks instead
+of silently changing their behavior.
+
 ## Logging & Profiling
 
 | Arguments | Description | Defaults |

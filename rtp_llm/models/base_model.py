@@ -8,6 +8,7 @@ import torch
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.output_vocab_config import OutputVocabMapping
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
@@ -20,16 +21,17 @@ from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
-    KVCacheSpecType,
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
     KVCacheSpecDesc,
+    KVCacheSpecType,
     MlaOpsType,
     MoeConfig,
     ParallelismConfig,
 )
 from rtp_llm.utils.database import CkptDatabase
+from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.time_util import timer_wrapper
 
 
@@ -83,6 +85,7 @@ class BaseModel(object):
         self.merge_lora = merge_lora
         self.device_resource_config = device_resource_config
         self.force_cpu_load_weights = force_cpu_load_weights
+        self.output_vocab_mapping: Optional[OutputVocabMapping] = None
         self.weight = None
         self.weight_manager = None
 
@@ -103,6 +106,58 @@ class BaseModel(object):
 
         if self.model_config.generate_env_config:
             self.load_default_generate_config(self.model_config.generate_env_config)
+
+    def _validate_output_vocab_weights(self) -> None:
+        if self.output_vocab_mapping is None:
+            return
+        if self.weight is None:
+            raise ValueError("output vocabulary pruning requires loaded model weights")
+
+        embedding = self.weight.get_global_weight_or_none(W.embedding)
+        if embedding is None or embedding.dim() != 2:
+            raise ValueError(
+                "output vocabulary pruning requires a two-dimensional Input Embedding"
+            )
+        max_output_token_id = self.output_vocab_mapping.local_to_full[-1]
+        if max_output_token_id >= embedding.size(0):
+            raise ValueError(
+                f"output token id {max_output_token_id} is not covered by the "
+                f"loaded Input Embedding with {embedding.size(0)} rows"
+            )
+
+        lm_head = self.weight.get_global_weight_or_none(W.lm_head)
+        if lm_head is None or lm_head.dim() != 2:
+            raise ValueError(
+                "output vocabulary pruning requires a two-dimensional LM Head"
+            )
+        # Mirror AtomicWeight._split() exactly. Attention TP controls whether
+        # splitting runs, while LM Head TP controls the row padding itself.
+        load_config = self.model_weights_loader.get_load_config()
+        tp_size = load_config.tp_size
+        dp_size = load_config.dp_size
+        ep_size = load_config.ep_size
+        lm_head_tp_size = load_config.lm_head_tp_size
+        output_vocab_size = self.output_vocab_mapping.size
+        # AtomicWeight invokes its split function when any of TP/DP/EP is distributed.
+        lm_head_is_split = tp_size > 1 or dp_size > 1 or ep_size > 1
+        expected_lm_head_rows = (
+            ((output_vocab_size + lm_head_tp_size * 8 - 1) // (lm_head_tp_size * 8)) * 8
+            if lm_head_is_split
+            else output_vocab_size
+        )
+        if lm_head.size(0) != expected_lm_head_rows:
+            raise ValueError(
+                f"loaded LM Head has {lm_head.size(0)} rows on this rank, "
+                f"expected {expected_lm_head_rows} for output vocabulary size "
+                f"{output_vocab_size}, effective tp_size {tp_size}, "
+                f"lm_head_tp_size {lm_head_tp_size}, dp_size {dp_size}, "
+                f"and ep_size {ep_size}"
+            )
+        if lm_head.size(1) != self.model_config.hidden_size:
+            raise ValueError(
+                "loaded LM Head must use row-major [V,H] layout with hidden size "
+                f"{self.model_config.hidden_size}, got shape {tuple(lm_head.shape)}"
+            )
 
     def load_default_generate_config(self, generate_env_config: Optional[Any] = None):
         """Load default generate config from GenerateEnvConfig.
@@ -141,6 +196,7 @@ class BaseModel(object):
         self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
         self._load(device_str)
+        self._validate_output_vocab_weights()
         self.weight_manager = WeightManager(
             self.device, self.weight, self.model_weights_loader
         )
@@ -234,6 +290,7 @@ class BaseModel(object):
         device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
         skip_python_model: bool = False,
+        output_vocab_mapping: Optional[OutputVocabMapping] = None,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -263,6 +320,14 @@ class BaseModel(object):
             device_resource_config=device_resource_config,
             force_cpu_load_weights=force_cpu_load_weights,
         )
+        model.output_vocab_mapping = output_vocab_mapping
+        if output_vocab_mapping is not None:
+            eos_token_id = model.model_config.special_tokens.eos_token_id
+            if eos_token_id >= 0 and not output_vocab_mapping.contains(eos_token_id):
+                raise ValueError(
+                    f"model EOS token {eos_token_id} is not present in the "
+                    "configured output vocabulary"
+                )
 
         import os
 
@@ -331,6 +396,7 @@ class BaseModel(object):
             kv_cache_config=self.kv_cache_config,
             merge_lora=self.merge_lora,
             load_method=self.load_method,
+            output_vocab_mapping=self.output_vocab_mapping,
         )
         misc_weights_info = (
             self.custom_module.get_custom_weight_info() if self.custom_module else []

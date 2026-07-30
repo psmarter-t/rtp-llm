@@ -63,6 +63,10 @@ public:
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
     std::vector<at::Generator> generator;
+
+    // Keep optional extensions at the end so existing aggregate initializers remain source-compatible.
+    torch::Tensor penalty_token_ids;  // local-id history used only by sampling penalties
+    bool          validate_logits_candidates = false;
 };
 
 struct SamplerOutput {

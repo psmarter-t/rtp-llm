@@ -18,6 +18,20 @@ cc_library(
 )
 
 cc_library(
+    name = "generation_limits",
+    hdrs = ["GenerationLimits.h"],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
+    name = "output_vocab_mapping",
+    hdrs = ["OutputVocabMapping.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "config_modules",
     hdrs = ["ConfigModules.h"],
     srcs = ["ConfigModules.cc"],

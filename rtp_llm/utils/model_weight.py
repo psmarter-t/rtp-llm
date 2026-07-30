@@ -656,30 +656,18 @@ def qkv_gather(
 def sp_0_pad8(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     align_size = tp * 8
     paded_size = int(math.ceil(t.shape[0] * 1.0 / align_size) * align_size)
-    pad_size = int(paded_size - t.shape[0])
     per_slice_size = int(paded_size / tp)
-    if pad_size != 0 and tp_rank == tp - 1:
-        if len(t.shape) == 2:
-            return torch.concat(
-                [
-                    t[tp_rank * per_slice_size :, :],
-                    torch.zeros([pad_size, t.shape[1]], device=t.device).to(t.dtype),
-                ],
-                dim=0,
-            )
-        else:
-            return torch.concat(
-                [
-                    t[tp_rank * per_slice_size :, :],
-                    torch.zeros([pad_size], device=t.device).to(t.dtype),
-                ],
-                dim=0,
-            )
-    else:
-        if len(t.shape) == 2:
-            return t[tp_rank * per_slice_size : (tp_rank + 1) * per_slice_size, :]
-        else:
-            return t[tp_rank * per_slice_size : (tp_rank + 1) * per_slice_size]
+    slice_start = tp_rank * per_slice_size
+    valid_size = max(0, min(per_slice_size, t.shape[0] - slice_start))
+    shard = (
+        t.narrow(0, slice_start, valid_size) if valid_size > 0 else t.narrow(0, 0, 0)
+    )
+    local_pad_size = per_slice_size - valid_size
+    if local_pad_size > 0:
+        shard = torch.concat(
+            [shard, t.new_zeros((local_pad_size, *t.shape[1:]))], dim=0
+        )
+    return shard
 
 
 def merge_qkv_hf(ts: List[torch.Tensor]):

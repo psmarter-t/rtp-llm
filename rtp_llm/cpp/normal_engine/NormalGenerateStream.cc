@@ -30,7 +30,9 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
 
-    for (int i = 0; i < nextBatchSize(); i++) {
+    // CompleteTokenIds has already applied this step, so currentBatchSize() is
+    // the number of output sequences represented by update_info.
+    for (int i = 0; i < currentBatchSize(); i++) {
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count = iter_count_;
         generate_output.output_ids          = torch::empty({1, (int64_t)output_len}, torch::kInt32);
@@ -177,7 +179,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs.defined()) {
         RTP_LLM_CHECK(update_info.softmax_probs.dim() == 2);
         RTP_LLM_CHECK(update_info.softmax_probs.size(1) == update_info.num_new_tokens);
-        setSoftmaxProbs(update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
+        setSoftmaxProbs(
+            update_info.softmax_probs, seqLength() - update_info.num_new_tokens, update_info.src_batch_indices);
     }
 
     finished_ = needFinish();

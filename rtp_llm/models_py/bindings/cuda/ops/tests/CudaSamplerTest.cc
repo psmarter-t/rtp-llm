@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/cuda/ops/tests/CudaTestUtils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/GenerationLimits.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
@@ -567,6 +568,67 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
     ASSERT_EQ(output_token_ids_host[23], 7);
 }
 
+TEST_F(CudaSamplerTest, testFlashinferTopK1CumLogProbs) {
+    constexpr int64_t batch_size = 2;
+    constexpr int64_t vocab_size = 3;
+    constexpr int64_t step       = 1;
+
+    const auto run = [&](bool return_original_all_probs) {
+        auto logits_t = cudaTensor({0.0f, 0.0f, std::log(2.0f), 0.0f, std::log(3.0f), 0.0f}, {batch_size, vocab_size});
+        auto output_token_ids_t = cudaIntTensor({9, 0, 8, 0}, {batch_size, step + 1});
+        auto sequence_lengths_t = cudaIntTensor({1, 1}, {batch_size});
+        auto input_lengths_t    = cudaIntTensor({-1, -1}, {batch_size});
+        auto cum_log_probs_t    = cudaTensor({-1.0f, -2.0f}, {batch_size});
+        auto output_all_probs_t =
+            torch::zeros({batch_size, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+        auto                       top_k_t       = pinnedIntTensor({1, 1});
+        auto                       top_p_t       = pinnedFloatTensor({1.0f, 1.0f});
+        auto                       temperature_t = pinnedFloatTensor({1.0f, 1.0f});
+        std::vector<at::Generator> generator(batch_size);
+
+        GreedyParams params({logits_t,
+                             input_lengths_t,
+                             sequence_lengths_t,
+                             output_token_ids_t,
+                             step,
+                             top_k_t,
+                             top_p_t,
+                             temperature_t,
+                             nullopt,
+                             nullopt,
+                             cum_log_probs_t,
+                             nullopt,
+                             return_original_all_probs,
+                             output_all_probs_t,
+                             nullopt,
+                             nullopt,
+                             nullopt,
+                             generator});
+        execSampleGreedy(params);
+        check_cuda_error();
+
+        auto output_token_ids_host = toHostInt(output_token_ids_t);
+        EXPECT_EQ(output_token_ids_host[step], 2);
+        EXPECT_EQ(output_token_ids_host[2 * (step + 1) - 1], 1);
+
+        const auto cum_log_probs_host    = toHostFloat(cum_log_probs_t);
+        const auto output_all_probs_host = toHostFloat(output_all_probs_t);
+        if (return_original_all_probs) {
+            ASSERT_VECTOR_NEAR(output_all_probs_host, std::vector<float>({0.25f, 0.25f, 0.5f, 0.2f, 0.6f, 0.2f}), 1e-4);
+            EXPECT_NEAR(cum_log_probs_host[0], -1.0f + std::log(0.5f), 1e-4);
+            EXPECT_NEAR(cum_log_probs_host[1], -2.0f + std::log(0.6f), 1e-4);
+        } else {
+            ASSERT_VECTOR_NEAR(output_all_probs_host, std::vector<float>({0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f}), 1e-4);
+            EXPECT_NEAR(cum_log_probs_host[0], -1.0f, 1e-4);
+            EXPECT_NEAR(cum_log_probs_host[1], -2.0f, 1e-4);
+        }
+    };
+
+    run(false);
+    run(true);
+}
+
 TEST_F(CudaSamplerTest, testFlashinferSeedOffsetSameAcrossBatchRows) {
     constexpr int64_t batch_size = 4;
     constexpr int64_t vocab_size = 6;
@@ -900,6 +962,34 @@ TEST_F(CudaSamplerTest, testBanRepeatNGram) {
             }
         }
     }
+}
+
+TEST_F(CudaSamplerTest, testBanRepeatNGramIgnoresInvalidDirectKernelValues) {
+    constexpr int64_t batch_size = 2;
+    constexpr int64_t vocab_size = 4;
+    constexpr int64_t max_step   = rtp_llm::kMaxNoRepeatNgramSize + 1;
+
+    auto       logits_t = cudaTensor({1.0f, 2.0f, 3.0f, 4.0f, 4.0f, 3.0f, 2.0f, 1.0f}, {batch_size, vocab_size});
+    auto       sequence_lengths_t = cudaIntTensor({max_step - 1, max_step - 1}, {batch_size});
+    auto       no_repeat_sizes_t  = cudaIntTensor({-1, rtp_llm::kMaxNoRepeatNgramSize + 1}, {batch_size});
+    const auto expected_logits    = toHostFloat(logits_t);
+    const auto stream             = at::cuda::getCurrentCUDAStream().stream();
+
+    tensorrt_llm::kernels::invokeBanRepeatNgram(logits_t.data_ptr<float>(),
+                                                nullptr,
+                                                nullptr,
+                                                nullptr,
+                                                nullptr,
+                                                sequence_lengths_t.data_ptr<int32_t>(),
+                                                batch_size,
+                                                1,
+                                                max_step,
+                                                no_repeat_sizes_t.data_ptr<int32_t>(),
+                                                vocab_size,
+                                                max_step,
+                                                stream);
+    check_cuda_error();
+    ASSERT_VECTOR_NEAR(toHostFloat(logits_t), expected_logits, 1e-6);
 }
 
 TEST_F(CudaSamplerTest, testPenalty) {

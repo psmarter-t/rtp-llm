@@ -1,18 +1,21 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
+#include <utility>
 
 using namespace std;
 
 namespace rtp_llm {
 
-LogitsProcessorStates::LogitsProcessorStates() {};
+LogitsProcessorStates::LogitsProcessorStates(OutputVocabMappingPtr output_vocab_mapping):
+    output_vocab_mapping_(std::move(output_vocab_mapping)) {}
 
 void LogitsProcessorStates::batchProcess(const SamplerInputs& inputs) {
-    for (size_t i = 0; i < logits_processors_.size(); i++) {
+    for (size_t i = 0; i < logits_processors_.size(); ++i) {
         logits_processors_[i]->process(inputs, intervals_[i].first, intervals_[i].second);
     }
 }
 
 void LogitsProcessorStates::insert(const BaseLogitsProcessorPtr& ptr, size_t start, size_t finish) {
+    ptr->setOutputVocabMapping(output_vocab_mapping_);
     logits_processors_.push_back(ptr);
     intervals_.push_back(std::make_pair(start, finish));
 }

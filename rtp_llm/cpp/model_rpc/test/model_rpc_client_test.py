@@ -87,9 +87,9 @@ class FakeModelRpcClient(ModelRpcClient):
     def __init__(self):
         # Call parent __init__ with minimal required parameters
         super().__init__(
-            [],     # addresses: empty list for fake client
-            {},     # client_config: empty dict for fake client
-            0,      # max_rpc_timeout_ms
+            [],  # addresses: empty list for fake client
+            {},  # client_config: empty dict for fake client
+            0,  # max_rpc_timeout_ms
             False,  # decode_entrance
         )
         self.stub = FakeStub()
@@ -116,6 +116,19 @@ class ModelRpcClientTest(TestCase):
         async for res in client.enqueue(input):
             responses.extend(res.generate_outputs)
         return responses
+
+    def test_no_repeat_ngram_size_serializes_as_scalar(self):
+        input_py = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2]),
+            generate_config=GenerateConfig(no_repeat_ngram_size=32),
+            mm_inputs=[],
+        )
+
+        input_pb = trans_input(input_py)
+
+        self.assertTrue(input_pb.generate_config.HasField("no_repeat_ngram_size"))
+        self.assertEqual(input_pb.generate_config.no_repeat_ngram_size.value, 32)
 
     @unittest.skip("need fix")
     def test_generate_stream(self):

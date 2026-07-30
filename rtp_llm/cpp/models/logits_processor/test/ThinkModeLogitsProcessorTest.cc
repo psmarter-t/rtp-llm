@@ -33,7 +33,6 @@ public:
                                               end_think_token_ids,
                                               0,
                                               0,
-                                              0,
                                               std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids));
             think_info.dfa_ptr->forceSetStatus(think_status[i]);
             think_infos.push_back(think_info);
@@ -133,7 +132,7 @@ TEST_F(SamplerTest, testMemFill) {
     processor->memFill(tensor2[2], 5, 2);
     processor->memFill(tensor2[3], 5, 3);
 
-    float neg_inf = -std::numeric_limits<float>::max();
+    float neg_inf = -std::numeric_limits<float>::infinity();
 
     auto t2vec = [](const torch::Tensor& t) {
         auto c = t.contiguous();
@@ -207,6 +206,38 @@ TEST_F(SamplerTest, testUpdateStatus) {
     }
 }
 
+TEST_F(SamplerTest, testUpdateStatusUsesCurrentTensorLayout) {
+    auto                     dfa = std::make_shared<StringContainDFA<size_t, int>>(std::vector<int>{5, 6});
+    ThinkModeLogitsProcessor processor(
+        {StreamThinkInfo(true, 10, {5, 6}, /*input_length=*/2, /*output_length=*/0, dfa)});
+
+    // Dynamic Beam may still be in its 1 -> 1 phase and therefore sends only
+    // the newly sampled token despite the request having a future Beam width.
+    processor.updateStatus(torch::tensor({{5}}, torch::kInt32), 1);
+    EXPECT_EQ(processor.thinkEndTokensStatus(), (std::vector<size_t>{1}));
+
+    // Once Beam expands, GenerateStream sends the complete sequence. The next
+    // token starts at input_length + current_output_length.
+    processor.updateStatus(torch::tensor({{11, 12, 5, 6}}, torch::kInt32), 1);
+    EXPECT_EQ(processor.thinkEndTokensStatus(), (std::vector<size_t>{2}));
+}
+
+TEST_F(SamplerTest, testUpdateStatusUsesIncrementalRowsForMultipleReturns) {
+    std::vector<StreamThinkInfo> infos;
+    for (int i = 0; i < 2; ++i) {
+        infos.emplace_back(true,
+                           10,
+                           std::vector<int>{5},
+                           /*input_length=*/3,
+                           /*output_length=*/0,
+                           std::make_shared<StringContainDFA<size_t, int>>(std::vector<int>{5}));
+    }
+    ThinkModeLogitsProcessor processor(std::move(infos));
+
+    processor.updateStatus(torch::tensor({{5}, {4}}, torch::kInt32), 1);
+    EXPECT_EQ(processor.thinkEndTokensStatus(), (std::vector<size_t>{1, 0}));
+}
+
 std::vector<float> tensorToVector(const at::Tensor& tensor, size_t size) {
     std::vector<float> vec(size, 0);
     for (size_t i = 0; i < tensor.size(0); ++i) {
@@ -247,7 +278,7 @@ TEST_F(SamplerTest, testSetVocabMask) {
                                           i % 2 == 0 ? true : false);
         }
 
-        float neg_inf = -std::numeric_limits<float>::max();
+        float neg_inf = -std::numeric_limits<float>::infinity();
 
         std::vector<float> expect_vec_0 = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
         std::vector<float> expect_vec_1 = {
