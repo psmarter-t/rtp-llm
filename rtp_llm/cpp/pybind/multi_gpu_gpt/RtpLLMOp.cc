@@ -38,7 +38,6 @@ OutputVocabMappingPtr parseOutputVocabMapping(const py::object& model, const Mod
 
     auto mapping = std::make_shared<OutputVocabMapping>(py_mapping.attr("full_vocab_size").cast<int64_t>(),
                                                         py_mapping.attr("local_to_full").cast<std::vector<int32_t>>(),
-                                                        py_mapping.attr("model_identity").cast<std::string>(),
                                                         py_mapping.attr("config_digest").cast<std::string>());
     if (mapping->fullVocabSize() != model_config.vocab_size) {
         throw std::invalid_argument("output vocabulary mapping does not match ModelConfig.vocab_size");

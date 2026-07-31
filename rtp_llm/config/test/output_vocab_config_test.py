@@ -27,7 +27,6 @@ class OutputVocabConfigTest(unittest.TestCase):
     def _base_config(self, output_vocab):
         return {
             "version": 1,
-            "model_identity": "test-model-revision",
             "model_vocab_size": 10,
             "output_vocab": output_vocab,
         }
@@ -67,7 +66,6 @@ class OutputVocabConfigTest(unittest.TestCase):
         config_path = self._write_config(
             {
                 "version": 1,
-                "model_identity": "LensRecall_nd_pg_attn@test",
                 "model_vocab_size": 217303,
                 "output_vocab": {
                     "ranges": [{"start_id": 151643, "end_id": 217303}],
@@ -85,19 +83,13 @@ class OutputVocabConfigTest(unittest.TestCase):
         self.assertEqual(mapping.to_local(217302), 65659)
         self.assertIsNone(mapping.to_local(151642))
 
-    def test_complete_vocab_disables_pruning(self):
+    def test_complete_vocab_is_rejected(self):
         config_path = self._write_config(
             self._base_config({"ranges": [{"start_id": 0, "end_id": 10}]})
         )
-        config = OutputVocabConfig(
-            config_path=config_path, model_identity="test-model-revision"
-        )
 
-        self.assertIsNone(config.resolve(full_vocab_size=10))
-        self.assertIsNone(config.resolve(full_vocab_size=10))
-        self.assertEqual(len(config.config_digest), 64)
-        self.assertIn("output_vocab_pruning: disabled", config.to_string())
-        self.assertIn("test-model-revision", config.to_string())
+        with self.assertRaisesRegex(ValueError, "proper subset.*K=10, V=10"):
+            load_output_vocab_mapping(config_path, full_vocab_size=10)
 
     def test_input_embedding_must_cover_all_output_tokens(self):
         config_path = self._write_config(self._base_config({"token_ids": [0, 7]}))
@@ -129,13 +121,6 @@ class OutputVocabConfigTest(unittest.TestCase):
                 },
                 "unsupported",
             ),
-            (
-                {
-                    **self._base_config({"token_ids": [1]}),
-                    "model_identity": "",
-                },
-                "non-empty",
-            ),
         ]
 
         for config, message in invalid_cases:
@@ -152,6 +137,13 @@ class OutputVocabConfigTest(unittest.TestCase):
                     "model_revision": "typo",
                 },
                 "output vocab config root.*model_revision",
+            ),
+            (
+                {
+                    **self._base_config({"token_ids": [1]}),
+                    "model_identity": "obsolete-field",
+                },
+                "output vocab config root.*model_identity",
             ),
             (
                 self._base_config({"token_id": [1]}),
@@ -178,29 +170,67 @@ class OutputVocabConfigTest(unittest.TestCase):
 
     def test_cached_mapping_is_bound_to_input_vocab_size(self):
         config_path = self._write_config(self._base_config({"token_ids": [0, 4, 7]}))
-        config = OutputVocabConfig(
-            config_path=config_path, model_identity="test-model-revision"
+        config = OutputVocabConfig(enabled=True)
+        checkpoint_path = os.path.dirname(config_path)
+
+        self.assertIsNotNone(
+            config.resolve(
+                checkpoint_path=checkpoint_path,
+                full_vocab_size=10,
+                input_vocab_size=8,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "current model uses"):
+            config.resolve(
+                checkpoint_path=checkpoint_path,
+                full_vocab_size=10,
+                input_vocab_size=9,
+            )
+
+    def test_disabled_config_ignores_model_file(self):
+        config_path = self._write_config({"not": "a valid output vocab config"})
+        config = OutputVocabConfig()
+
+        self.assertIsNone(
+            config.resolve(
+                checkpoint_path=os.path.dirname(config_path), full_vocab_size=10
+            )
+        )
+        self.assertEqual(config.config_digest, "")
+        self.assertEqual(config.to_string(), "enable_output_vocab_pruning: false")
+
+    def test_enabled_config_loads_fixed_file_from_checkpoint(self):
+        config_path = self._write_config(self._base_config({"token_ids": [0, 4, 7]}))
+        config = OutputVocabConfig(enabled=True)
+
+        mapping = config.resolve(
+            checkpoint_path=os.path.dirname(config_path), full_vocab_size=10
         )
 
-        self.assertIsNotNone(config.resolve(full_vocab_size=10, input_vocab_size=8))
-        with self.assertRaisesRegex(ValueError, "current model uses"):
-            config.resolve(full_vocab_size=10, input_vocab_size=9)
-
-    def test_deployment_identity_is_required_and_must_match(self):
-        config_path = self._write_config(self._base_config({"token_ids": [0, 4, 7]}))
-
-        with self.assertRaisesRegex(ValueError, "must be set"):
-            OutputVocabConfig(config_path=config_path).resolve(full_vocab_size=10)
-
-        with self.assertRaisesRegex(ValueError, "does not match deployment identity"):
-            OutputVocabConfig(
-                config_path=config_path, model_identity="different-model"
-            ).resolve(full_vocab_size=10)
-
-        mapping = OutputVocabConfig(
-            config_path=config_path, model_identity="test-model-revision"
-        ).resolve(full_vocab_size=10)
         self.assertIsNotNone(mapping)
+        self.assertEqual(mapping.source_path, os.path.abspath(config_path))
+        self.assertIn(config_path, config.to_string())
+
+    def test_enabled_config_requires_model_file(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+
+        with self.assertRaisesRegex(ValueError, "output_vocab.json"):
+            OutputVocabConfig(enabled=True).resolve(
+                checkpoint_path=temp_dir.name, full_vocab_size=10
+            )
+
+    def test_invalid_json_is_rejected(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        config_path = os.path.join(temp_dir.name, "output_vocab.json")
+        with open(config_path, "w", encoding="utf-8") as writer:
+            writer.write("{invalid json")
+
+        with self.assertRaises(json.JSONDecodeError):
+            OutputVocabConfig(enabled=True).resolve(
+                checkpoint_path=temp_dir.name, full_vocab_size=10
+            )
 
     def test_matching_rank_states_are_accepted(self):
         states = [
@@ -252,7 +282,9 @@ class OutputVocabConfigTest(unittest.TestCase):
 
 class OutputVocabRankCollectiveTest(unittest.TestCase):
     def _resolve_with_peer(self, output_vocab_config, peer_state):
-        model_config = SimpleNamespace(vocab_size=10, input_vocab_size=10)
+        model_config = SimpleNamespace(
+            vocab_size=10, input_vocab_size=10, ckpt_path="/model"
+        )
         engine_config = SimpleNamespace(
             output_vocab_config=output_vocab_config,
             parallelism_config=SimpleNamespace(world_size=2),
@@ -303,7 +335,6 @@ class OutputVocabRankCollectiveTest(unittest.TestCase):
         mapping = OutputVocabMapping(
             full_vocab_size=10,
             local_to_full=(0, 4, 9),
-            model_identity="test-model-revision",
             config_digest="digest",
             source_path="output-vocab.json",
         )
@@ -315,6 +346,11 @@ class OutputVocabRankCollectiveTest(unittest.TestCase):
         result, gather = self._resolve_with_peer(output_vocab_config, peer_state)
 
         self.assertIs(result, mapping)
+        output_vocab_config.resolve.assert_called_once_with(
+            checkpoint_path="/model",
+            full_vocab_size=10,
+            input_vocab_size=10,
+        )
         gather.assert_called_once()
 
 

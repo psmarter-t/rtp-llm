@@ -5,7 +5,7 @@
 namespace rtp_llm {
 
 TEST(OutputVocabMappingTest, ConvertsBetweenLocalAndFullIds) {
-    OutputVocabMapping mapping(10, {0, 2, 7, 9}, "test-model", "digest");
+    OutputVocabMapping mapping(10, {0, 2, 7, 9}, "digest");
 
     EXPECT_EQ(mapping.fullVocabSize(), 10);
     EXPECT_EQ(mapping.size(), 4);
@@ -18,14 +18,14 @@ TEST(OutputVocabMappingTest, ConvertsBetweenLocalAndFullIds) {
 }
 
 TEST(OutputVocabMappingTest, RejectsInvalidMappings) {
-    EXPECT_THROW(OutputVocabMapping(10, {}, "model", "digest"), std::invalid_argument);
-    EXPECT_THROW(OutputVocabMapping(10, {0, 2, 2}, "model", "digest"), std::invalid_argument);
-    EXPECT_THROW(OutputVocabMapping(10, {0, 11}, "model", "digest"), std::invalid_argument);
-    EXPECT_THROW(OutputVocabMapping(10, {2, 1}, "model", "digest"), std::invalid_argument);
+    EXPECT_THROW(OutputVocabMapping(10, {}, "digest"), std::invalid_argument);
+    EXPECT_THROW(OutputVocabMapping(10, {0, 2, 2}, "digest"), std::invalid_argument);
+    EXPECT_THROW(OutputVocabMapping(10, {0, 11}, "digest"), std::invalid_argument);
+    EXPECT_THROW(OutputVocabMapping(10, {2, 1}, "digest"), std::invalid_argument);
 }
 
 TEST(OutputVocabMappingTest, RejectsOutOfRangeLocalId) {
-    OutputVocabMapping mapping(10, {0, 2, 7}, "test-model", "digest");
+    OutputVocabMapping mapping(10, {0, 2, 7}, "digest");
 
     EXPECT_THROW(mapping.toFull(-1), std::out_of_range);
     EXPECT_THROW(mapping.toFull(3), std::out_of_range);

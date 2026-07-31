@@ -123,13 +123,14 @@ sampler operates on the resulting logical vocabulary size `K`; generated token
 IDs and optional full-logits/probability responses are restored to the original
 model vocabulary space before they are returned.
 
-The feature is disabled when `--output_vocab_config_path` is empty. Both CLI
-arguments also have equivalent uppercase environment variables.
+The feature is disabled by default. Enable it with the CLI flag or its
+equivalent environment variable. When enabled, RTP-LLM loads
+`output_vocab.json` from the checkpoint directory and fails startup if the file
+is missing or invalid.
 
 | Argument | Environment variable | Description | Default |
 |----------|----------------------|-------------|---------|
-| `--output_vocab_config_path` | `OUTPUT_VOCAB_CONFIG_PATH` | Path to a versioned JSON output-vocabulary configuration. | `""` |
-| `--output_vocab_model_identity` | `OUTPUT_VOCAB_MODEL_IDENTITY` | Deployment model/tokenizer revision or manifest identity. It must exactly match the JSON `model_identity`. | `""` |
+| `--enable_output_vocab_pruning` | `ENABLE_OUTPUT_VOCAB_PRUNING` | Load `<checkpoint>/output_vocab.json` and enable output-vocabulary pruning. | `false` |
 
 The version 1 schema accepts half-open ranges and discrete token IDs. The two
 lists may be combined; IDs are sorted and deduplicated when the configuration is
@@ -138,7 +139,6 @@ loaded.
 ```json
 {
   "version": 1,
-  "model_identity": "model-name@revision",
   "model_vocab_size": 217303,
   "output_vocab": {
     "ranges": [
@@ -149,13 +149,14 @@ loaded.
 }
 ```
 
-The configured set must be non-empty, remain inside both the model vocabulary
-and input embedding, and contain the model EOS token. Beam Search requests must
+The configured set must be a non-empty proper subset of the model vocabulary,
+remain inside both the model vocabulary and input embedding, and contain the
+model EOS token. Beam Search requests must
 also satisfy `K > 2 * max_beam_width`; Greedy and Sampling requests do not have
 this constraint. Think-mode requests require every configured end-think token
 to be retained. Tree decoding is currently rejected when pruning is enabled.
-A configuration containing the complete identity mapping is accepted but
-leaves pruning disabled.
+To run without pruning, leave the switch disabled; a complete-vocabulary
+configuration is rejected as a deployment error.
 
 The initial implementation supports plain FP16, BF16, and FP32 tied or untied
 LM Heads. It rejects quantized LM Heads, LM Head bias or LoRA, FT-style
