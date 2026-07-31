@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence, Tuple
 
 
+OUTPUT_VOCAB_FILENAME = "output_vocab.json"
+
+
 def _require_int(value: Any, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{field_name} must be an integer, got {value!r}")
@@ -27,7 +30,6 @@ def _reject_unknown_fields(
 class OutputVocabMapping:
     full_vocab_size: int
     local_to_full: Tuple[int, ...]
-    model_identity: str
     config_digest: str
     source_path: str
 
@@ -123,14 +125,12 @@ def validate_output_vocab_rank_states(
 
 def _build_digest(
     version: int,
-    model_identity: str,
     full_vocab_size: int,
     local_to_full: Tuple[int, ...],
 ) -> str:
     canonical = json.dumps(
         {
             "version": version,
-            "model_identity": model_identity,
             "model_vocab_size": full_vocab_size,
             "local_to_full": local_to_full,
         },
@@ -159,17 +159,13 @@ def load_output_vocab_mapping(
         raise ValueError("output vocab config root must be a JSON object")
     _reject_unknown_fields(
         raw_config,
-        ("version", "model_identity", "model_vocab_size", "output_vocab"),
+        ("version", "model_vocab_size", "output_vocab"),
         "output vocab config root",
     )
 
     version = _require_int(raw_config.get("version"), "version")
     if version != 1:
         raise ValueError(f"unsupported output vocab config version: {version}")
-
-    model_identity = raw_config.get("model_identity")
-    if not isinstance(model_identity, str) or not model_identity.strip():
-        raise ValueError("model_identity must be a non-empty string")
 
     configured_vocab_size = _require_int(
         raw_config.get("model_vocab_size"), "model_vocab_size"
@@ -220,6 +216,11 @@ def load_output_vocab_mapping(
         raise ValueError("output vocab config does not contain any token")
 
     local_to_full = tuple(sorted(set(expanded_ids)))
+    if len(local_to_full) >= full_vocab_size:
+        raise ValueError(
+            "output vocab config must keep a proper subset of the model vocabulary, "
+            f"got K={len(local_to_full)}, V={full_vocab_size}"
+        )
     effective_input_vocab_size = (
         input_vocab_size
         if input_vocab_size is not None and input_vocab_size > 0
@@ -240,12 +241,11 @@ def load_output_vocab_mapping(
         )
 
     duplicate_count = len(expanded_ids) - len(local_to_full)
-    digest = _build_digest(version, model_identity, full_vocab_size, local_to_full)
+    digest = _build_digest(version, full_vocab_size, local_to_full)
     logging.info(
-        "loaded output vocab config: path=%s, model_identity=%s, raw_tokens=%d, "
+        "loaded output vocab config: path=%s, raw_tokens=%d, "
         "output_vocab_size=%d, duplicates=%d, digest=%s",
         config_path,
-        model_identity,
         len(expanded_ids),
         len(local_to_full),
         duplicate_count,
@@ -254,7 +254,6 @@ def load_output_vocab_mapping(
     return OutputVocabMapping(
         full_vocab_size=full_vocab_size,
         local_to_full=local_to_full,
-        model_identity=model_identity,
         config_digest=digest,
         source_path=os.path.abspath(config_path),
     )
@@ -262,77 +261,58 @@ def load_output_vocab_mapping(
 
 @dataclass
 class OutputVocabConfig:
-    config_path: str = ""
-    model_identity: str = ""
+    enabled: bool = False
     _resolved: bool = field(default=False, init=False, repr=False)
     _full_vocab_size: int = field(default=0, init=False, repr=False)
     _input_vocab_size: int = field(default=0, init=False, repr=False)
-    _resolved_model_identity: str = field(default="", init=False, repr=False)
     _resolved_config_path: str = field(default="", init=False, repr=False)
     _config_digest: str = field(default="", init=False, repr=False)
     _mapping: Optional[OutputVocabMapping] = field(default=None, init=False, repr=False)
 
     def resolve(
         self,
+        checkpoint_path: str,
         full_vocab_size: int,
         input_vocab_size: Optional[int] = None,
     ) -> Optional[OutputVocabMapping]:
-        if not self.config_path:
+        if not self.enabled:
             return None
-        if not isinstance(self.model_identity, str) or not self.model_identity.strip():
-            raise ValueError(
-                "output_vocab_model_identity must be set when output vocabulary "
-                "pruning is enabled"
-            )
+        if not isinstance(checkpoint_path, str) or not checkpoint_path:
+            raise ValueError("checkpoint_path must be set for output vocabulary pruning")
         effective_input_vocab_size = (
             input_vocab_size
             if input_vocab_size is not None and input_vocab_size > 0
             else full_vocab_size
         )
-        resolved_config_path = os.path.abspath(self.config_path)
+        resolved_config_path = os.path.abspath(
+            os.path.join(checkpoint_path, OUTPUT_VOCAB_FILENAME)
+        )
         if self._resolved:
             if (
                 self._full_vocab_size != full_vocab_size
                 or self._input_vocab_size != effective_input_vocab_size
-                or self._resolved_model_identity != self.model_identity
                 or self._resolved_config_path != resolved_config_path
             ):
                 raise ValueError(
                     "output vocab config was resolved for "
                     f"({self._full_vocab_size}, {self._input_vocab_size}, "
-                    f"{self._resolved_model_identity!r}, "
                     f"{self._resolved_config_path!r}), but the current model uses "
                     f"({full_vocab_size}, {effective_input_vocab_size}, "
-                    f"{self.model_identity!r}, {resolved_config_path!r})"
+                    f"{resolved_config_path!r})"
                 )
             return self._mapping
 
         mapping = load_output_vocab_mapping(
-            self.config_path,
+            resolved_config_path,
             full_vocab_size=full_vocab_size,
             input_vocab_size=input_vocab_size,
         )
-        if mapping.model_identity != self.model_identity:
-            raise ValueError(
-                "output vocab config model_identity "
-                f"{mapping.model_identity!r} does not match deployment identity "
-                f"{self.model_identity!r}"
-            )
-        is_full_vocab = mapping.size == full_vocab_size and all(
-            local_id == full_id
-            for local_id, full_id in enumerate(mapping.local_to_full)
-        )
-        self._mapping = None if is_full_vocab else mapping
+        self._mapping = mapping
         self._full_vocab_size = full_vocab_size
         self._input_vocab_size = effective_input_vocab_size
-        self._resolved_model_identity = self.model_identity
         self._resolved_config_path = resolved_config_path
         self._config_digest = mapping.config_digest
         self._resolved = True
-        if is_full_vocab:
-            logging.info(
-                "output vocab config keeps the complete vocabulary; pruning is disabled"
-            )
         return self._mapping
 
     @property
@@ -340,26 +320,17 @@ class OutputVocabConfig:
         return self._config_digest
 
     def to_string(self) -> str:
-        if not self.config_path:
-            return "output_vocab_config_path: <disabled>"
+        if not self.enabled:
+            return "enable_output_vocab_pruning: false"
         if not self._resolved:
             return (
-                f"output_vocab_config_path: {self.config_path}\n"
-                f"output_vocab_model_identity: {self.model_identity or '<missing>'}\n"
+                "enable_output_vocab_pruning: true\n"
+                f"output_vocab_filename: {OUTPUT_VOCAB_FILENAME}\n"
                 "resolved: false"
             )
-        if self._mapping is None:
-            return (
-                f"output_vocab_config_path: {self.config_path}\n"
-                f"output_vocab_model_identity: {self.model_identity}\n"
-                "resolved: true\n"
-                "output_vocab_pruning: disabled\n"
-                f"output_vocab_size: {self._full_vocab_size}\n"
-                f"config_digest: {self._config_digest}"
-            )
         return (
-            f"output_vocab_config_path: {self.config_path}\n"
-            f"output_vocab_model_identity: {self.model_identity}\n"
+            "enable_output_vocab_pruning: true\n"
+            f"output_vocab_config_path: {self._resolved_config_path}\n"
             "resolved: true\n"
             "output_vocab_pruning: enabled\n"
             f"output_vocab_size: {self._mapping.size}\n"

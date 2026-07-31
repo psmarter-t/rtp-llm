@@ -17,11 +17,9 @@ class OutputVocabMapping {
 public:
     OutputVocabMapping(int64_t              full_vocab_size,
                        std::vector<int32_t> local_to_full,
-                       std::string          model_identity,
                        std::string          config_digest):
         full_vocab_size_(full_vocab_size),
         local_to_full_(std::move(local_to_full)),
-        model_identity_(std::move(model_identity)),
         config_digest_(std::move(config_digest)) {
         if (full_vocab_size_ <= 0) {
             throw std::invalid_argument("output vocabulary full size must be positive");
@@ -57,10 +55,6 @@ public:
         return local_to_full_;
     }
 
-    const std::string& modelIdentity() const {
-        return model_identity_;
-    }
-
     const std::string& configDigest() const {
         return config_digest_;
     }
@@ -88,7 +82,6 @@ private:
     int64_t              full_vocab_size_;
     std::vector<int32_t> local_to_full_;
     std::vector<int32_t> full_to_local_;
-    std::string          model_identity_;
     std::string          config_digest_;
 };
 

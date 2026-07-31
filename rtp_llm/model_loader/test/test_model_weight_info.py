@@ -62,7 +62,6 @@ def make_output_vocab_mapping(
     return OutputVocabMapping(
         full_vocab_size=full_vocab_size,
         local_to_full=local_to_full,
-        model_identity="test-model",
         config_digest="test-digest",
         source_path="test-output-vocab.json",
     )

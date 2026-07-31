@@ -67,6 +67,7 @@ class ModelFactory:
         local_error: Optional[Exception] = None
         try:
             mapping = engine_config.output_vocab_config.resolve(
+                checkpoint_path=model_config.ckpt_path,
                 full_vocab_size=model_config.vocab_size,
                 input_vocab_size=(
                     model_config.input_vocab_size
