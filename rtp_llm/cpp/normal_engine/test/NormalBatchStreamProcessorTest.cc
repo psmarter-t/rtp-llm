@@ -550,7 +550,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsGreedyTokenBeforeStreamUpdate) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping = mapping;
@@ -587,7 +587,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsGreedyTokenBeforeStrea
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabSamplerFailureIsolatedBeforeTokenMapping) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping = mapping;
@@ -629,7 +629,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabSamplerFailureIsolatedBefo
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabGreedyRejectsFullyMaskedCandidates) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping = mapping;
@@ -665,7 +665,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabGreedyRejectsFullyMaskedCa
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabSamplingRejectsNoRepeatWhenKIsOne) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{2}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{2}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping = mapping;
@@ -701,7 +701,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabSamplingRejectsNoRepeatWhe
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabThinkMaskSurvivesTemperatureBeforeNoRepeat) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping = mapping;
@@ -744,8 +744,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabThinkMaskSurvivesTemperatu
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabBeamRejectsFullyMaskedCandidates) {
-    auto mapping =
-        std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 4, 7, 9}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 4, 7, 9}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping = mapping;
@@ -928,7 +927,7 @@ TEST_F(NormalBatchStreamProcessorTest, testFinishedEosOverridesThinkHardTerminat
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsMixedLengthGreedyBatchFromLastColumn) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping = mapping;
@@ -967,8 +966,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsMixedLengthGreedyBatch
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsOnlyLatestBeamTokens) {
-    auto mapping =
-        std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 4, 7, 9}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 4, 7, 9}, "digest");
 
     auto cache_config = test::makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/8, /*tokens_per_block=*/2, rtp_llm::TYPE_INT8);
@@ -1014,7 +1012,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsOnlyLatestBeamTokens) 
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabSupportsSmallSamplingVocabAndClampsTopK) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping = mapping;
@@ -1055,8 +1053,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabSupportsSmallSamplingVocab
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsDynamicBeamAcrossExpansionSteps) {
-    auto mapping =
-        std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 1, 2, 4, 5, 7, 9}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 1, 2, 4, 5, 7, 9}, "digest");
 
     auto cache_config = test::makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/16, /*tokens_per_block=*/2, rtp_llm::TYPE_INT8);
@@ -1125,8 +1122,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsDynamicBeamAcrossExpan
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabDynamicBeamOneToOneThenExpandInMixedSamplerBatch) {
-    auto mapping =
-        std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 1, 2, 4, 5, 7, 9}, "test-model", "digest");
+    auto mapping      = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 1, 2, 4, 5, 7, 9}, "digest");
     auto cache_config = test::makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/32, /*tokens_per_block=*/2, rtp_llm::TYPE_INT8);
     ResourceContext resource_context;
@@ -1195,8 +1191,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabDynamicBeamOneToOneThenExp
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMixedExpansionAndShrinkUseSeparateSamplerOutputs) {
-    auto mapping =
-        std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 1, 2, 4, 5, 7, 9}, "test-model", "digest");
+    auto mapping      = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 1, 2, 4, 5, 7, 9}, "digest");
     auto cache_config = test::makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/32, /*tokens_per_block=*/2, rtp_llm::TYPE_INT8);
     ResourceContext resource_context;
@@ -1297,8 +1292,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMixedExpansionAndShrinkUse
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabDynamicBeamTwoToOneToOneUsesStepLayouts) {
-    auto mapping =
-        std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 1, 2, 4, 5, 7, 9}, "test-model", "digest");
+    auto mapping      = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 1, 2, 4, 5, 7, 9}, "digest");
     auto cache_config = test::makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/24, /*tokens_per_block=*/2, rtp_llm::TYPE_INT8);
     ResourceContext resource_context;
@@ -1447,7 +1441,7 @@ TEST_F(NormalBatchStreamProcessorTest, testThinkTracksDynamicBeamIncrementalThen
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabSkipsPenaltyHistoryWhenPenaltiesAreDisabled) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -1475,7 +1469,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabSkipsPenaltyHistoryWhenPen
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsHistoryForPenalty) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping = mapping;
@@ -1516,7 +1510,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsHistoryForPenalty) {
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabNoRepeatNgramIgnoresOutOfSetBannedToken) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -1554,7 +1548,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabNoRepeatNgramIgnoresOutOfS
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsFullIdLogitsProcessorOnDemand) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -1591,7 +1585,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsFullIdLogitsProcessorO
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabPreservesLogitsProcessorOrder) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     LogitsProcessorStates states(mapping);
     states.insert(std::make_shared<LocalEosOnlyProcessor>(1), 0, 1);
@@ -1609,7 +1603,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabPreservesLogitsProcessorOr
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabReturnsFullIdLogitsShape) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -1659,7 +1653,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabReturnsFullIdLogitsShape) 
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabSoftmaxUsesLocalIdBeforeRestore) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -1700,7 +1694,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabSoftmaxUsesLocalIdBeforeRe
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabReturnsFullIdProbabilityShape) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -1739,7 +1733,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabReturnsFullIdProbabilitySh
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsLossLabels) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -1774,7 +1768,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsLossLabels) {
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsPromptLogitsIdsAndTargets) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -1819,7 +1813,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsPromptLogitsIdsAndTarg
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsEveryReturnedSamplingSequence) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7, 9}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7, 9}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -1863,7 +1857,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsEveryReturnedSamplingS
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabUsesLocalEosAndFinishesWithFullEos) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -1915,8 +1909,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabUsesLocalEosAndFinishesWit
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabBeamAllProbsFollowSelectedParents) {
-    auto mapping =
-        std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 1, 2, 4, 5, 7, 9}, "test-model", "digest");
+    auto mapping      = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 1, 2, 4, 5, 7, 9}, "digest");
     auto cache_config = test::makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/64, /*tokens_per_block=*/2, rtp_llm::TYPE_INT8);
 
@@ -2014,8 +2007,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabBeamAllProbsFollowSelected
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabBeamReordersOutputsAndSoftmaxHistory) {
-    auto mapping =
-        std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 1, 2, 4, 5, 7, 9}, "test-model", "digest");
+    auto mapping      = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 1, 2, 4, 5, 7, 9}, "digest");
     auto cache_config = test::makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/64, /*tokens_per_block=*/2, rtp_llm::TYPE_INT8);
 
@@ -2108,8 +2100,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLensRecallSizedOutputVocabSupportsBea
     constexpr int32_t    output_vocab_size  = 65660;
     std::vector<int32_t> local_to_full(output_vocab_size);
     std::iota(local_to_full.begin(), local_to_full.end(), output_vocab_start);
-    auto mapping = std::make_shared<OutputVocabMapping>(
-        full_vocab_size, std::move(local_to_full), "LensRecall_nd_pg_attn@test", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(full_vocab_size, std::move(local_to_full), "digest");
 
     for (const int beam_width : {8, 16, 32}) {
         SCOPED_TRACE("beam_width=" + std::to_string(beam_width));
@@ -2174,7 +2165,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLensRecallSizedOutputVocabSupportsBea
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabInvalidBeamWidthIsAStreamError) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping = mapping;
@@ -2256,7 +2247,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultiSeqProcessorDefensivelyRejectsOu
 TEST_F(NormalBatchStreamProcessorTest, testThinkHardTerminatorRejectsFixedBeamExpansion) {
     std::vector<int32_t> retained_tokens(9);
     std::iota(retained_tokens.begin(), retained_tokens.end(), 0);
-    auto mapping = std::make_shared<OutputVocabMapping>(10, retained_tokens, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, retained_tokens, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -2282,7 +2273,7 @@ TEST_F(NormalBatchStreamProcessorTest, testThinkHardTerminatorRejectsFixedBeamEx
 TEST_F(NormalBatchStreamProcessorTest, testThinkHardTerminatorRejectsLaterDynamicBeamExpansion) {
     std::vector<int32_t> retained_tokens(9);
     std::iota(retained_tokens.begin(), retained_tokens.end(), 0);
-    auto mapping = std::make_shared<OutputVocabMapping>(10, retained_tokens, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, retained_tokens, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -2324,7 +2315,7 @@ TEST_F(NormalBatchStreamProcessorTest, testThinkRejectsEmptyTerminatorWithoutOut
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testRecommendationAllowsEmptyTerminator) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto            mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
     ResourceContext resource_context;
     resource_context.output_vocab_mapping = mapping;
     auto          model_config            = makeOutputVocabTestModelConfig();
@@ -2348,7 +2339,7 @@ TEST_F(NormalBatchStreamProcessorTest, testRecommendationAllowsEmptyTerminator) 
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabRejectsMissingThinkModeToken) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -2370,7 +2361,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabRejectsMissingThinkModeTok
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabRejectsMissingRecommendationTerminator) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -2391,7 +2382,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabRejectsMissingRecommendati
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabAcceptsRetainedRecommendationTerminator) {
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 5, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 5, 7}, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;
@@ -2417,7 +2408,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabAcceptsRetainedRecommendat
 TEST_F(NormalBatchStreamProcessorTest, testThinkBeamStartsWithOneProcessorStateThenExpands) {
     std::vector<int32_t> retained_tokens(9);
     std::iota(retained_tokens.begin(), retained_tokens.end(), 0);
-    auto mapping = std::make_shared<OutputVocabMapping>(10, retained_tokens, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, retained_tokens, "digest");
 
     ResourceContext resource_context;
     resource_context.output_vocab_mapping    = mapping;

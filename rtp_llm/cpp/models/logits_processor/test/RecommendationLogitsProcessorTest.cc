@@ -92,7 +92,7 @@ TEST_F(RecommendationLogitsProcessorTest, testProcessMapsFullBannedTokenToPruned
     info.current_prefix = {2};
     auto processor =
         std::make_shared<RecommendationLogitsProcessor>(std::vector<StreamRecommendationInfo>{std::move(info)});
-    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "test-model", "digest");
+    auto mapping = std::make_shared<OutputVocabMapping>(10, std::vector<int32_t>{0, 2, 7}, "digest");
 
     auto sampler_inputs = allocateSamplerInputs(1, 3, processor, mapping);
     sampler_inputs.logits.fill_(1.0f);
