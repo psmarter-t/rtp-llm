@@ -646,11 +646,25 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     }
 
     if (decoder_batch_size && params.no_repeat_ngram_size.has_value()) {
-        const auto& no_repeat_ngram_size = params.no_repeat_ngram_size.value();
-        if (std::any_of(no_repeat_ngram_size.data_ptr<int32_t>(),
-                        no_repeat_ngram_size.data_ptr<int32_t>() + decoder_batch_size,
+        const auto& no_repeat_ngram_size           = params.no_repeat_ngram_size.value();
+        auto        effective_no_repeat_ngram_size = no_repeat_ngram_size;
+        if (params.do_sample.has_value()) {
+            // Keep deterministic rows compatible with CUDA and with ROCm before no-repeat support was added.
+            const auto* do_sample = params.do_sample.value().data_ptr<bool>();
+            if (std::any_of(do_sample, do_sample + decoder_batch_size, [](bool enabled) { return !enabled; })) {
+                effective_no_repeat_ngram_size = no_repeat_ngram_size.clone();
+                auto* effective_sizes          = effective_no_repeat_ngram_size.data_ptr<int32_t>();
+                for (int64_t i = 0; i < decoder_batch_size; ++i) {
+                    if (!do_sample[i]) {
+                        effective_sizes[i] = 0;
+                    }
+                }
+            }
+        }
+        if (std::any_of(effective_no_repeat_ngram_size.data_ptr<int32_t>(),
+                        effective_no_repeat_ngram_size.data_ptr<int32_t>() + decoder_batch_size,
                         [](auto size) { return size != 0; })) {
-            auto no_repeat_ngram_size_gpu = no_repeat_ngram_size.to(torch::kCUDA);
+            auto no_repeat_ngram_size_gpu = effective_no_repeat_ngram_size.to(torch::kCUDA);
             auto output_ids_ptrs = torch::empty({decoder_batch_size}, torch::TensorOptions().dtype(torch::kInt64));
             for (int64_t i = 0; i < decoder_batch_size; ++i) {
                 output_ids_ptrs.data_ptr<int64_t>()[i] =

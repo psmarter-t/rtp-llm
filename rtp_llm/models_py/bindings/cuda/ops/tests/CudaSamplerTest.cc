@@ -1153,3 +1153,47 @@ TEST_F(CudaSamplerTest, testDoSample) {
                             step,
                             10);
 }
+
+TEST_F(CudaSamplerTest, testDoSampleFalseSkipsNoRepeatInMixedBatch) {
+    constexpr int64_t batch_size = 2;
+    constexpr int64_t vocab_size = 4;
+    constexpr size_t  step       = 1;
+
+    auto logits_t           = cudaTensor({0.0f, 1.0f, 5.0f, 0.0f, 0.0f, 1.0f, 5.0f, 0.0f}, {batch_size, vocab_size});
+    auto token_ids_t        = cudaIntTensor({2, 0, 2, 0}, {batch_size, static_cast<int64_t>(step + 1)});
+    auto input_lengths_t    = cudaIntTensor({1, 1}, {batch_size});
+    auto sequence_lengths_t = cudaIntTensor({0, 0}, {batch_size});
+    auto top_k_t            = pinnedIntTensor({1, 1});
+    auto top_p_t            = pinnedFloatTensor({1.0f, 1.0f});
+    auto temperature_t      = pinnedFloatTensor({1.0f, 1.0f});
+    auto no_repeat_t        = pinnedIntTensor({1, 1});
+    auto do_sample_t        = torch::tensor({false, true}, torch::kBool).pin_memory();
+
+    std::vector<at::Generator> generators(batch_size);
+
+    GreedyParams params({logits_t,
+                         input_lengths_t,
+                         sequence_lengths_t,
+                         token_ids_t,
+                         step,
+                         top_k_t,
+                         top_p_t,
+                         temperature_t,
+                         std::nullopt,
+                         no_repeat_t,
+                         std::nullopt,
+                         std::nullopt,
+                         false,
+                         std::nullopt,
+                         std::nullopt,
+                         std::nullopt,
+                         do_sample_t,
+                         generators});
+
+    execSampleGreedy(params);
+    check_cuda_error();
+
+    const auto output_ids = toHostInt(token_ids_t);
+    EXPECT_EQ(output_ids[1], 2);
+    EXPECT_EQ(output_ids[3], 1);
+}
