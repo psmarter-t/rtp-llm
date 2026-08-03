@@ -31,3 +31,15 @@ cc_test(
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )
+
+cc_test(
+    name = "sampler_op_test",
+    srcs = [
+        "RocmSamplerOpTest.cc",
+    ],
+    data = [],
+    copts = copts(),
+    deps = test_deps,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
+)
