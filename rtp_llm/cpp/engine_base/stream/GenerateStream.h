@@ -168,6 +168,7 @@ public:
     int  nextNumBeams() const;
     int  maxNumBeams() const;
     bool hasNumBeams() const;
+    bool usesBeamSearchTokenLayoutForCurrentStep() const;
 
     bool needTilingForSampling() const;
 

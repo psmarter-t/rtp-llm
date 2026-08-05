@@ -251,6 +251,10 @@ bool GenerateStream::hasNumBeams() const {
     return generate_input_->generate_config->hasNumBeams();
 }
 
+bool GenerateStream::usesBeamSearchTokenLayoutForCurrentStep() const {
+    return currentNumBeams() > 1 || nextNumBeams() > 1;
+}
+
 bool GenerateStream::needTilingForSampling() const {
     return isContextStream() && currentBatchSize() != nextBatchSize() && !hasNumBeams();
 }
@@ -860,7 +864,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                                      generate_input_->inputLength(),
                                      maxTokenNum(),
                                      vocab_size_,
-                                     hasNumBeams(),
+                                     usesBeamSearchTokenLayoutForCurrentStep(),
                                      streamId(),
                                      error_token_id)) {
         reportEventWithoutLock(StreamEvents::Error,

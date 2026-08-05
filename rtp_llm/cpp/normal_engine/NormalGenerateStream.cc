@@ -34,7 +34,8 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     generate_results.request_id = request_id_;
     torch::Tensor all_hidden_states_cpu;
 
-    for (int i = 0; i < nextBatchSize(); i++) {
+    // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
+    for (int i = 0; i < currentBatchSize(); i++) {
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count = iter_count_;
         generate_output.output_ids          = torch::empty({1, (int64_t)output_len}, torch::kInt32);
