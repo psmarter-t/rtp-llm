@@ -8,6 +8,7 @@ import torch
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.output_vocab_config import load_output_vocab_ids
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
@@ -20,16 +21,17 @@ from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
-    KVCacheSpecType,
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
     KVCacheSpecDesc,
+    KVCacheSpecType,
     MlaOpsType,
     MoeConfig,
     ParallelismConfig,
 )
 from rtp_llm.utils.database import CkptDatabase
+from rtp_llm.utils.model_weight import sp_0_pad8_size
 from rtp_llm.utils.time_util import timer_wrapper
 
 
@@ -94,6 +96,7 @@ class BaseModel(object):
         self.py_model = None
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
+        self._finalize_output_vocab_config()
 
         if (
             self.kv_cache_config.multi_task_prompt
@@ -338,8 +341,47 @@ class BaseModel(object):
         tokenizer_path = self.model_config.tokenizer_path
         model_type = self.model_config.model_type
         self.tokenizer = TokenizerFactory.create(ckpt_path, tokenizer_path, model_type)
-        if self.tokenizer.eos_token_id:
-            self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
+        eos_token_id = self.tokenizer.eos_token_id
+        if eos_token_id or (
+            self.model_config.enable_output_vocab_pruning and eos_token_id is not None
+        ):
+            self.model_config.special_tokens.eos_token_id = eos_token_id
+
+    def _finalize_output_vocab_config(self) -> None:
+        if not self.model_config.enable_output_vocab_pruning:
+            self.model_config.output_vocab_ids = []
+            self.model_config.output_vocab_padded_size = 0
+            return
+        if not self.model_config.has_lm_head:
+            raise ValueError("output vocabulary pruning requires a model LM head")
+
+        eos_token_id = self.model_config.special_tokens.eos_token_id
+        output_vocab_ids = load_output_vocab_ids(
+            self.model_config.ckpt_path,
+            self.model_config.vocab_size,
+            self.model_config.input_vocab_size,
+            tokenizer=self.tokenizer.get_real_tokenizer(),
+            extra_token_ids=(eos_token_id,),
+        )
+        self.model_config.output_vocab_ids = output_vocab_ids
+
+        is_distributed = (
+            self.parallelism_config.tp_size > 1
+            or self.parallelism_config.dp_size > 1
+            or self.parallelism_config.ep_size > 1
+        )
+        self.model_config.output_vocab_padded_size = (
+            sp_0_pad8_size(len(output_vocab_ids), self.parallelism_config.tp_size)
+            if is_distributed
+            else len(output_vocab_ids)
+        )
+        logging.info(
+            "finalized output vocabulary: V=%d, K=%d, P=%d, eos_token_id=%d",
+            self.model_config.vocab_size,
+            len(output_vocab_ids),
+            self.model_config.output_vocab_padded_size,
+            eos_token_id,
+        )
 
     def is_multimodal(self) -> bool:
         return self.model_config.mm_model_config.is_multimodal
