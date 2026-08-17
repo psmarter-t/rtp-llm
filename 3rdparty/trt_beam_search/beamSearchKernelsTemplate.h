@@ -258,8 +258,8 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
     // This TopK is needless in V2 workflow
     if constexpr (IS_V2)
     {
-        pStage2Ids += bid * nBMOut * 2;
-        pStage2LogProbs += bid * nBMOut * 2;
+        pStage2Ids += bid * nBMOut;
+        pStage2LogProbs += bid * nBMOut;
     }
     else
     {
@@ -292,7 +292,9 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
         __shared__ typename BlockReduce::TempStorage smemReduceBuffer;
         __shared__ int threadToUpdate;
 
-        for (int i = 0; i < 2 * nBMOut; ++i)
+        // Only the first nBMOut entries are consumed by the selection loop below (see its
+        // bound comment); entries beyond are dead work while the CBA path stays unwired.
+        for (int i = 0; i < nBMOut; ++i)
         {
             KVPair kv = BlockReduce(smemReduceBuffer).Reduce(kvLocal, argmax);
             if (tid == 0)
@@ -304,7 +306,7 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
             __syncthreads();
             // Only one thread needs to update the old partial before the next block reduce.
             // No need to do this in the last iteration.
-            if (tid == threadToUpdate && i < 2 * nBMOut - 1)
+            if (tid == threadToUpdate && i < nBMOut - 1)
             {
                 kvLocal.key = nCandidate - 1;
                 kvLocal.value = -MAX_T_VAL;
@@ -335,7 +337,11 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
         // Select finished beams into CBA or select tokens for next step sequentially
         // Reference (might be changed along HF in the future):
         // https://github.com/huggingface/transformers/blob/main/src/transformers/generation/beam_search.py#L272
-        for (int i = 0; i < 2 * nBMOut; ++i)
+        // Bound nBMOut (was 2*nBMOut) is safe for both workflows: with numBeamsCBA == nullptr
+        // every iteration fills one next-step slot and the loop breaks at nBeamForNextStep == nBMOut,
+        // so iterations beyond nBMOut were already dead. V1's stage 2 still fills 2*nBMOut entries;
+        // V2's stage 2 now emits nBMOut. Restore 2*nBMOut if the CBA path is ever wired.
+        for (int i = 0; i < nBMOut; ++i)
         {
             int topId;
             T topLogProb;
@@ -607,6 +613,7 @@ void beamSearchKernelLauncher(
     ===================================================================================================================================
 
     V2 Workflow (use Air-TopK for better performance, https://dl.acm.org/doi/pdf/10.1145/3581784.3607062)
+    Note: candidate widths shown as `nBM*2` below predate the 2k->1k change; stages now keep `nBM` candidates.
     logProbs.shape = [nBS, nBM, nV]
         |<- nV ->|          |<- nBM*2 ->|  |<- nBM*2 ->|          |<- nBM*2 ->|          |<- nBM*2 ->|          |<- nBM*2 ->|
         ┏━━━━━━━━┓          ┏━━━━━━━━━━━┓  ┏━━━━━━━━━━━┓          ┏━━━━━━━━━━━┓          ┏━━━━━━━━━━━┓  D       ┏━━━━━━━━━━━┓
@@ -630,6 +637,7 @@ void beamSearchKernelLauncher(
     ===================================================================================================================================
 
     V2 Workflow for VBWS, similar to V2 workflow above, but `nBMIn` and `nBMOut` might be different from `nBM`
+    Note: `nBMOut*2` widths predate the 2k->1k change; stages now keep `nBMOut` candidates.
     logProbs.shape = [nBS, nBMIn, nV]
         |<- nV ->|          |<- nBMOut*2 ->|  |<- nBMOut*2 ->|          |<- nBMOut*2 ->|          |<- nBMOut*2 ->|          |<- nBMOut*2 ->|
         ┏━━━━━━━━┓          ┏━━━━━━━━━━━━━━┓  ┏━━━━━━━━━━━━━━┓          ┏━━━━━━━━━━━━━━┓          ┏━━━━━━━━━━━━━━┓  D       ┏━━━━━━━━━━━━━━┓
@@ -687,20 +695,23 @@ void beamSearchKernelLauncher(
         void* pTopK = reinterpret_cast<void*>(reinterpret_cast<char*>(workspace) + offset);
 
         // Stage 1
-        invokeTopkLastDim<T>(nBS * nBMIn, nV, nBMOut * 2, true, mask_val, logProbs, pStage1LogProbs, pStage1Ids, 
-            pTopK, stream);
+        // sorted=false: stage-2 re-selects from these values, so the by-value order of stage-1
+        // output is never consumed; skipping it saves one StableSortPairsDescending per call.
+        invokeTopkLastDim<T>(nBS * nBMIn, nV, nBMOut, true, mask_val, logProbs, pStage1LogProbs, pStage1Ids,
+            pTopK, stream, /*sorted=*/false);
         check_cuda_error();
 
-        int nThread = std::min(std::max(roundUp(nBMIn * nBMOut * 2, 32), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);
+        int nThread = std::min(std::max(roundUp(nBMIn * nBMOut, 32), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);
         launchAddCumLogProbs<T>(pStage1LogProbs, bh.cumLogProbsIn, bh.finished, bh.endIds,
             bh.diversityRates, bh.batchSlots, nBS, nBMIn, nBMOut, nThread, stream);
-
-        // Stage 2
-        invokeTopkLastDim<T>(nBS, nBMIn * nBMOut * 2, nBMOut * 2, true, mask_val, pStage1LogProbs, pStage2LogProbs, 
-            pStage2Ids, pTopK, stream);
         check_cuda_error();
 
-        nThread = std::min(std::max(roundUp(nBMOut * 2, 32), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);
+        // Stage 2
+        invokeTopkLastDim<T>(nBS, nBMIn * nBMOut, nBMOut, true, mask_val, pStage1LogProbs, pStage2LogProbs,
+            pStage2Ids, pTopK, stream, /*sorted=*/true);
+        check_cuda_error();
+
+        nThread = std::min(std::max(roundUp(nBMOut, 32), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);
         gatherId<<<nBS, nThread, 0, stream>>>(pStage1Ids, pStage2Ids, nBS, nBMIn, nBMOut, nV);
         check_cuda_error();
     }
