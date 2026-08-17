@@ -1527,7 +1527,11 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
         // multi-block path for small grid_dim values, because the multi-block path
         // has inter-block sync overhead and multiple kernel launches (3 passes +
         // last_filter + sort). Force one-block when grid_dim is small.
-        auto_one_block = (grid_dim <= 4);
+        // grid_dim<=16 additionally requires batch_size>=8: measured on gfx942,
+        // one-block wins 1.4-5.6x for grid_dim 9..16 with batch_size>=8, while
+        // batch=1 shapes prefer multi-block. batch 2-7 stays on the original
+        // multi-block route (unmeasured, avoid regressions).
+        auto_one_block = (grid_dim <= 4) || (grid_dim <= 16 && batch_size >= 8);
 #else
         auto_one_block = (grid_dim == 1);
 #endif
